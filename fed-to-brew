@@ -1,0 +1,598 @@
+#!/bin/bash
+
+###############
+# VARIABLES
+###############
+WORKDIR="${HOME}/fedtobrew"
+VERBOSE="FALSE"
+COMMAND=""
+FED_GIT_CHECKOUT="master"
+FED_DIST="rawhide"
+BREW_BRANCH=""
+BREW_DIST=""
+PACKAGE_LIST=""
+CUSTOM_MESSAGE=""
+YAML_FILE=""
+TEXT_FILE=""
+LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
+OVERALL_TXT="${WORKDIR}/results/overal-status.txt"
+OVERALL_HTML="${WORKDIR}/results/overal-status.html"
+DEP_LIST="brew git fedpkg rhpkg"
+
+###############
+# SETUP and CHECK
+###############
+mkdir -vp ${WORKDIR}/{brew,fed,logs,map,results,tmp}
+for this_dep in ${DEP_LIST}
+do
+  test_path="$(which ${this_dep} 2>/dev/null)"
+  if [ "${test_path}" == "" ] ; then
+    echo "${this_dep} was not found in your path."
+    echo "${DEP_LIST} needs to be installed, and in your path."
+    echo "exiting..."
+    exit 1
+  fi
+done
+
+###############
+# Show help
+###############
+usage() {
+  echo "Usage `basename $0` [command] <options> <[package 1] ... [package n]>" >&2
+  echo >&2
+  echo "Multipurpose tool to help tracking, syncing, building packages between" >&2
+  echo "  fedora and brew." >&2
+  echo >&2
+  echo "Commands: (there must be one command, only one)" >&2
+  echo "  --sync" >&2
+  echo "    Sync package(s) from Fedora dist-git to Brew dist-git." >&2
+  echo "    Only syncs from one git commit, does not do entire history." >&2
+  echo "    Mandatory: --brew-branch" >&2
+  echo "    Mandatory: --yaml OR --txt OR [package]" >&2
+  echo "  --check" >&2
+  echo "    Check the status of builds" >&2
+  echo "  --build --rebuild" >&2
+  echo "    Build package(s) in brew, if they have not already been built." >&2
+  echo "    Will sync packages Fedora dist-git to Brew dist-git if needed." >&2
+  echo "    Mandatory: --brew-branch" >&2
+  echo "    Mandatory: --brew-dist" >&2
+  echo "    Mandatory: --yaml OR --text OR [package]" >&2
+  echo >&2
+  echo "Options:" >&2
+  echo "  -c --checkout [branch or hash]" >&2
+  echo "    What to checkout of the fedora dist-git, can be branch or hash" >&2
+  echo "    Warning: If using hash, only use one package" >&2
+  echo "    Default: ${FED_GIT_CHECKOUT}" >&2
+  echo "    Example branch: f26" >&2
+  echo "    Example hash: 082464dc0d06d48d2f9c4d2110e8aafe4ef1c957" >&2
+  echo "  -bb --brew-branch [branch]" >&2
+  echo "    What brew branch to sync to" >&2
+  echo "  -fd --fed-dist [dist]" >&2
+  echo "    What to dist to pull the fedora source from" >&2
+  echo "    Should only be needed if using a hash for checkout" >&2
+  echo "    Default: ${FED_DIST}" >&2
+  echo "    Example: f26" >&2
+  echo "  -bd --brew-dist [dist]" >&2
+  echo "    What dist tag to use when checking brew build status" >&2
+  echo "    Example: .el7" >&2
+  echo "  -m --message [message]" >&2
+  echo "    Use a custom commit message for brew dist-git" >&2
+  echo "  --text [file]" >&2
+  echo "    Text file to use for list of packages" >&2
+  echo "      Each package is on its own line in format <n-v-r>.src" >&2
+  echo "      Example:acl-2.2.52-15.fc27.src" >&2
+  echo "  --yaml [file]" >&2
+  echo "    yaml file to use for list of packages" >&2
+  echo "      Should be in the standard fedora module yaml file format." >&2
+  echo "  -v --verbose --debug" >&2
+  echo "    Be verbose, for debugging" >&2
+  echo "  -h, --help" >&2
+  echo "    Show this options menu" >&2
+  echo >&2
+  echo "Other:" >&2
+  echo "  [package]" >&2
+  echo "    If you want to do just a single file, list just the name" >&2
+  echo "    Not applied if either --yaml or --text are used." >&2
+  echo >&2
+  popd &>/dev/null
+  exit 1
+}
+
+###############
+# Parse a yaml file
+###############
+function parse_yaml {
+   local prefix=$2
+   local s='[[:space:]]*' w='[a-zA-Z0-9_-+.]*' fs=$(echo @|tr @ '\034')
+   sed -ne "s|^\($s\):|\1|" \
+        -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
+        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p"  $1 |
+   awk -F$fs '{
+      indent = length($1)/2;
+      vname[indent] = $2;
+      for (i in vname) {if (i > indent) {delete vname[i]}}
+      if (length($3) > 0) {
+         vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
+         printf("%s%s%s=\"%s\"\n", "'$prefix'",vn, $2, $3);
+      }
+   }'
+}
+
+###############
+# Parse a yaml file
+###############
+function get_packages {
+  if [ "${YAML_FILE}" != "" ] ; then
+    for line in $(parse_yaml ${YAML_FILE})
+    do
+      if echo $line | grep -q _ref= ; then
+        this_name="$(echo $line | awk -F'__' '{print $4}')"
+        fed_hash="$(echo $line | awk -F'"' '{print $2}')"
+        echo "${this_name} ${fed_hash}"
+      fi
+    done
+  elif [ "${TEXT_FILE}" != "" ] ; then
+    for line in $(cat "${TEXT_FILE}")
+    do
+      fed_nvr="$(echo ${line} | sed "s/-[0-9]*:/-/" | sed 's/.src//')"
+      fed_hash="$(fedpkg gitbuildhash ${fed_nvr} 2>/dev/null)"
+      this_name="$(koji rpminfo ${line} | grep 'SRPM Path:' | awk -F'/' '{print $5}')"
+      echo "${this_name} ${fed_hash} ${fed_nvr}"
+    done
+  elif [ "${PACKAGE_LIST}" != "" ] ; then
+    for this_name in ${PACKAGE_LIST}
+    do
+      cd ${WORKDIR}/tmp
+      fedpkg clone ${this_name} >> ${LOGFILE} 2>&1
+      cd ${this_name}
+      git checkout ${FED_GIT_CHECKOUT} >> ${LOGFILE} 2>&1
+      fed_hash="$(git log -n1 --format=%H)"
+      cd ${WORKDIR}/tmp
+      rm -rf ${WORKDIR}/tmp/${this_name}
+      echo "${this_name} ${fed_hash}"
+    done
+  else
+    echo ; echo "ERROR: No packages or files given to process" ; echo
+    usage
+    exit 5
+  fi
+}
+
+###############
+# Update overall status in results directory
+###############
+update_overall_status() {
+    if [ "${VERBOSE}" == "TRUE" ] ; then
+      echo "    this_name: ${this_name}"
+      echo "    this_status: ${this_status}"
+      echo "    this_nvr: ${this_nvr}"
+      echo "    task_number: ${task_number}"
+    fi
+
+    if grep -q "^${this_name}" ${OVERALL_TXT} ; then
+      sed -i "s|^${this_name} .*|${this_name} ${this_status} ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number}|" ${OVERALL_TXT}
+    else
+      echo "${this_name} ${this_status} ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number}" >> ${OVERALL_TXT}
+    fi
+}
+
+###############
+# Sync fedora dist-git to brew dist-git
+###############
+sync_distgit() {
+  this_name="${1}"
+  if [ "${2}" == "" ] ; then
+    fed_hash="${FED_GIT_CHECKOUT}"
+  else
+    fed_hash="${2}"
+  fi
+  echo "  Syncing dist-git: ${this_name}"
+  # Checkout Fedora dist-git
+  echo "    Download and Setup Fedora dist-git repo"
+  cd ${WORKDIR}/fed
+  if [ -d ${this_name} ] ; then
+    rm -rf ${this_name}
+  fi
+  fedpkg clone ${this_name} >> ${LOGFILE} 2>&1
+  if ! [ $? -eq 0 ] ; then
+    echo "    Unable to clone ${this_name}"
+    echo "      You might not have permissions, or"
+    echo "      ${this_name} might not be a package."
+    exit 1
+  fi
+  cd ${this_name}
+  git checkout ${fed_hash} >> ${LOGFILE} 2>&1
+  if ! [ $? -eq 0 ] ; then
+    echo "    Unable to checkout ${this_name} ${fed_hash}"
+    exit 1
+  fi
+  fedpkg sources >> ${LOGFILE} 2>&1
+  if ! [ $? -eq 0 ] ; then
+    # For hashtags we have to pass a dist, assuming rawhide
+    fedpkg --dist ${FED_DIST} sources >> ${LOGFILE} 2>&1
+    if ! [ $? -eq 0 ] ; then
+      echo "    Error: We are unable to get our sources for ${this_name}"
+      exit 1
+    fi
+  fi
+  if [ "${CUSTOM_MESSAGE}" == "" ] ; then
+    COMMIT_MESSAGE="$(git log -n1 --format=%s)"
+  else
+    COMMIT_MESSAGE="${CUSTOM_MESSAGE}"
+  fi
+  THIS_NVR="$(fedpkg --release master verrel 2>/dev/null | sed 's|.fc27|.dist|')"
+  if [ "${THIS_NVR}" == "" ] ; then
+    THIS_NVR="${this_name}"
+  fi
+  FED_COMMIT_HASH="$(git log -n1 --format=%H)"
+
+  # Checkout Brew dist-git
+  echo "    Download and Setup Brew dist-git repo"
+  cd ${WORKDIR}/brew
+  if [ -d ${this_name} ] ; then
+    rm -rf ${this_name}
+  fi
+  rhpkg clone ${this_name} >> ${LOGFILE} 2>&1
+  if ! [ $? -eq 0 ] ; then
+    echo "    Unable to clone ${this_name}"
+    echo "      You might not have permissions, or"
+    echo "      ${this_name} might not be a package."
+    exit 1
+  fi
+  cd ${this_name}
+  rhpkg switch-branch ${BREW_BRANCH} >> ${LOGFILE} 2>&1
+  if ! [ $? -eq 0 ] ; then
+    echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
+    echo "    Not proceeding further with ${this_name} sync."
+    exit 1
+  fi
+
+  # rsync fed to brew
+  echo "    Syncing from Fed dist-git to Brew dist-git"
+  rsync -avH --exclude=.git/ --delete ${WORKDIR}/fed/${this_name}/ ${WORKDIR}/brew/${this_name}/ >> ${LOGFILE} 2>&1
+
+  # Push up to brew dist-git
+  echo "    Committing and Uploading to Brew dist-git"
+  cd ${WORKDIR}/brew/${this_name}
+  if grep -q SHA512 sources ; then
+    source_list="$(cat sources | awk -F"(" '{print $2}' | awk -F")" '{print $1}' ORS=' ')"
+  else
+    source_list="$(cat sources | awk '{print $2}' ORS=' ')"
+  fi
+  if [ "${VERBOSE}" == "TRUE" ] ; then
+    echo "source_list: ${source_list}"
+    echo "COMMIT_MESSAGE: ${COMMIT_MESSAGE}"
+  fi
+  rhpkg new-sources ${source_list} >> ${LOGFILE} 2>&1
+  git add -A >> ${LOGFILE} 2>&1
+  rhpkg commit -m "${COMMIT_MESSAGE} fed_hash: ${FED_COMMIT_HASH}" >> ${LOGFILE} 2>&1
+  rhpkg push >> ${LOGFILE} 2>&1
+  BREW_COMMIT_HASH="$(git log -n1 --format=%H)"
+
+  # Document what hashes matchs
+  if [ "${VERBOSE}" == "TRUE" ] ; then
+    echo "THIS_NVR: ${THIS_NVR}"
+    echo "FED_COMMIT_HASH: ${FED_COMMIT_HASH}"
+    echo "BREW_COMMIT_HASH: ${BREW_COMMIT_HASH}"
+  fi
+  echo "${THIS_NVR} fed_rev: ${FED_COMMIT_HASH} brew_rev: ${BREW_COMMIT_HASH}" >> ${WORKDIR}/map/${this_name}
+
+  echo "  Syncing finished: ${this_name}" ; echo
+}
+
+###############
+# Sync fedora dist-git to brew dist-git
+###############
+build_package() {
+  this_name="${1}"
+  if [ "${2}" == "" ] ; then
+    fed_hash="${FED_GIT_CHECKOUT}"
+  else
+    fed_hash="${2}"
+  fi
+  if [ "${3}" != "" ] ; then
+    this_nvr="${3}"
+  fi
+  echo "  Building: ${this_name}"
+  if [ -f ${WORKDIR}/map/${this_name} ] ; then
+    test_hash="$(tail -n 1 ${WORKDIR}/map/${this_name} | awk '{print $3}')"
+  fi
+  if [ "${VERBOSE}" == "TRUE" ] ; then
+    echo "    NVR: ${this_nvr}"
+    echo "    Name: ${this_name}"
+    echo "    Fed Hash: ${fed_hash}"
+    echo "    Old Hash: ${test_hash}"
+  fi
+  if [ "${test_hash}" == "${fed_hash}" ] ; then
+    echo "    Already synced from Fedora to Brew dist-git"
+  else
+    echo "    Syncing from Fedora to Brew dist-git"
+    sync_distgit ${this_name} ${fed_hash}
+  fi
+  # Everything should be setup by now, lets start the build
+  if [ -f ${WORKDIR}/logs/${this_name}.build ] ; then
+    echo "    Already Building: ${this_name}"
+  else
+    echo "    Checking build status"
+    if [ -d ${WORKDIR}/brew/${this_name} ] ; then
+      cd ${WORKDIR}/brew/${this_name}
+      rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
+      if ! [ $? -eq 0 ] ; then
+        echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
+        echo "    Not proceeding further with ${this_name} build."
+        exit 2
+      fi
+      rhpkg pull >/dev/null 2>&1
+    else
+      cd ${WORKDIR}/brew
+      rhpkg clone ${this_name} >/dev/null 2>&1
+      if ! [ $? -eq 0 ] ; then
+        echo "    Unable to clone ${this_name}"
+        echo "      You might not have permissions, or"
+        echo "      ${this_name} might not be a package."
+        exit 2
+      fi
+      cd ${WORKDIR}/brew/${this_name}
+      rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
+      if ! [ $? -eq 0 ] ; then
+        echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
+        echo "    Not proceeding further with ${this_name} build."
+        exit 2
+      fi
+    fi
+    test_nvr="$(rhpkg verrel 2>/dev/null | sed "s|.el[0-9]|${BREW_DIST}|")"
+    if [ "${test_nvr}" == "" ] ; then
+      test_nvr="${this_name}-$(grep ^Version: *.spec | awk '{print $2}')-$(grep ^Release: *.spec | awk '{print $2}' | sed "s/%{?dist}/${BREW_DIST}/")"
+    fi
+    brew_build="$(brew buildinfo ${test_nvr})"
+    if echo "${brew_build}" | grep -q "No such build:" ; then
+      echo "    Building: ${test_nvr}"
+      rhpkg build --skip-nvr-check --nowait >> /home/tdawson/fedtobrew/logs/${this_name}.build 2>&1
+    elif echo "${brew_build}" | grep -q "FAILED" ; then
+      echo "    Last build failed."
+      echo "    Building Again: ${test_nvr}"
+      rhpkg build --skip-nvr-check --nowait >> /home/tdawson/fedtobrew/logs/${this_name}.build 2>&1
+    else
+      echo "    No need to start new build: ${test_nvr}"
+      echo "      $(echo "${brew_build}" | grep "State:")"
+      echo "      $(echo "${brew_build}" | grep "Finished:")"
+      cd ${WORKDIR}/brew
+      rm -rf ${WORKDIR}/brew/${this_name}
+    fi
+  fi
+  echo "  Building finished: ${this_name}" ; echo
+}
+###############
+# Check build status
+###############
+check_build_status() {
+  cd ${WORKDIR}/logs
+  for build_log in $(ls -1 *.build)
+  do
+    this_name="$(echo ${build_log} | sed 's|.build||')"
+    task_number="$(grep Created ${build_log} | awk '{print $3}')"
+    echo; echo "  Working On: ${this_name} ${task_number}"
+    if [ "${task_number}" == "" ] ; then
+      echo "    ERROR: No task_number found"
+      this_nvr="ERROR"
+      task_number="ERROR"
+      this_status="ERROR"
+      update_overall_status
+    else
+      this_taskinfo="$(brew taskinfo ${task_number})"
+      this_state="$(echo "${this_taskinfo}" | grep State: | awk '{print $2}')"
+      this_nvr="$(echo "${this_taskinfo}" | grep Build: | awk '{print $2}')"
+      echo "    Current State: ${this_state}"
+      if [ "${this_state}" == "closed" ] || [ "${this_state}" == "failed" ] || [ "${this_state}" == "canceled" ] ; then
+        mkdir -vp ${WORKDIR}/results/${this_name}/${task_number} > /dev/null
+        if [ "${this_state}" == "closed" ] ; then
+          this_status="SUCCESS"
+        fi
+        if [ "${this_state}" == "failed" ] ; then
+          this_status="FAILURE"
+          brew download-logs -r -d ${WORKDIR}/results/${this_name}/${task_number} ${task_number}
+        fi
+        if [ "${this_state}" == "canceled" ] ; then
+          this_status="FAILURE"
+        fi
+        update_overall_status
+        echo "${this_status}: ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number}" >> ${WORKDIR}/results/${this_name}/status.txt
+        mv ${WORKDIR}/logs/${build_log} ${WORKDIR}/results/${this_name}/${task_number}/${build_log}.txt
+        rm -rf ${WORKDIR}/brew/${this_name}
+      else
+        this_status="BUILDING"
+        update_overall_status
+      fi
+    fi
+    echo
+  done
+}
+
+###############
+# Create Status Web Page
+###############
+create_status_page() {
+  sort -o ${OVERALL_TXT} ${OVERALL_TXT}
+  overall_total="$(cat ${OVERALL_TXT} |wc -l)"
+  overall_building="$(grep BUILDING ${OVERALL_TXT} |wc -l)"
+  overall_success="$(grep SUCCESS ${OVERALL_TXT} |wc -l)"
+  overall_failure="$(grep -e FAILURE -e ERROR ${OVERALL_TXT} |wc -l)"
+
+  rm -f ${OVERALL_HTML}
+  echo "<html>" >> ${OVERALL_HTML}
+  echo "<head><title>RHEL Build Progress</title></head>" >> ${OVERALL_HTML}
+  echo "<body>" >> ${OVERALL_HTML}
+  echo "<h1>RHEL Build Progress</h1>" >> ${OVERALL_HTML}
+  echo "<p>Page updated: " >> ${OVERALL_HTML}
+  date --utc >> ${OVERALL_HTML}
+  echo "</p>" >> ${OVERALL_HTML}
+  echo "<h2>Totals</h2>" >> ${OVERALL_HTML}
+  echo "<p>" >> ${OVERALL_HTML}
+  echo "Building: <strong>${overall_building}</strong><br>" >> ${OVERALL_HTML}
+  echo "Success: <strong>${overall_success}</strong><br>" >> ${OVERALL_HTML}
+  echo "Failure: <strong>${overall_failure}</strong><br>" >> ${OVERALL_HTML}
+  echo "Total: <strong>${overall_total}</strong><br>" >> ${OVERALL_HTML}
+  echo "</p>" >> ${OVERALL_HTML}
+  echo "<h2>Details</h2>" >> ${OVERALL_HTML}
+  echo "<table border=1 style="width:100%">" >> ${OVERALL_HTML}
+  echo "<tr><th>Name</th><th>STATUS</th><th>NVR</th><th>Build URL</th></tr>" >> ${OVERALL_HTML}
+
+  cat ${OVERALL_TXT} | while read line
+  do
+    this_name="$(echo ${line} | awk '{print $1}')"
+    this_status="$(echo ${line} | awk '{print $2}')"
+    this_nvr="$(echo ${line} | awk '{print $3}')"
+    task_url="$(echo ${line} | awk '{print $4}')"
+    if [ "${task_url}" == "" ] ; then
+      task_url="${this_nvr}"
+      this_nvr="Still in build setup"
+    fi
+    task_number="$(echo ${task_url} | awk -F'=' '{print $2}')"
+    if [ "${VERBOSE}" == "TRUE" ] ; then
+      echo "    this_name: ${this_name}"
+      echo "    this_nvr: ${this_nvr}"
+      echo "    this_status: ${this_status}"
+      echo "    task_number: ${task_number}"
+      echo "    task_url: ${task_url}"
+    fi
+    this_color="#FF0000"
+    if [ "${this_status}" == "SUCCESS" ] ; then
+          this_color="#00FF00"
+    elif [ "${this_status}" == "BUILDING" ] ; then
+          this_color="#00FFFF"
+    fi
+    echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${OVERALL_HTML}
+  done
+
+  echo "</table>" >> ${OVERALL_HTML}
+  echo "</body>" >> ${OVERALL_HTML}
+  echo "</html>" >> ${OVERALL_HTML}
+}
+
+###############
+# Get our arguments
+###############
+while [[ "$#" -ge 1 ]]
+do
+key="$1"
+case $key in
+    --sync )
+      export COMMAND="SYNC"
+    ;;
+    --check )
+      export COMMAND="CHECK"
+    ;;
+    --build | --rebuild )
+      export COMMAND="BUILD"
+    ;;
+    -c | --checkout )
+      export FED_GIT_CHECKOUT="${2}"
+      shift
+    ;;
+    -bb | --brew-branch )
+      export BREW_BRANCH="${2}"
+      shift
+    ;;
+    -fd | --fed-dist )
+      export FED_DIST="${2}"
+      shift
+    ;;
+    -bd | --brew-dist )
+      export BREW_DIST="${2}"
+      shift
+    ;;
+    -m | --message )
+      export CUSTOM_MESSAGE="${2}"
+      shift
+    ;;
+    --yaml )
+      export YAML_FILE="${2}"
+      shift
+    ;;
+    --text )
+      export TEXT_FILE="${2}"
+      shift
+    ;;
+    -v | --verbose | --debug)
+      export VERBOSE="TRUE"
+    ;;
+    -h | --help )
+      usage
+      exit 1
+    ;;
+    *)
+      PACKAGE_LIST="${PACKAGE_LIST} ${key}"
+    ;;
+esac
+shift # past argument or value
+done
+
+if [ "${VERBOSE}" == "TRUE" ] ; then
+  echo "COMMAND: ${COMMAND}"
+  echo "WORKDIR: ${WORKDIR}"
+  echo "OVERALL_TXT: ${OVERALL_TXT}"
+  echo "OVERALL_HTML: ${OVERALL_HTML}"
+  echo "FED_GIT_CHECKOUT: ${FED_GIT_CHECKOUT}"
+  echo "FED_DIST: ${FED_DIST}"
+  echo "BREW_BRANCH: ${BREW_BRANCH}"
+  echo "BREW_DIST: ${BREW_DIST}"
+  echo "PACKAGE_LIST: ${PACKAGE_LIST}"
+  echo "CUSTOM_MESSAGE: ${CUSTOM_MESSAGE}"
+  echo "LOGFILE: ${LOGFILE}"
+  echo "YAML_FILE: ${YAML_FILE}"
+  echo "TEXT_FILE: ${TEXT_FILE}"
+fi
+
+case "${COMMAND}" in
+  SYNC )
+    if [ "${BREW_BRANCH}" == "" ] ; then
+      echo ; echo "ERROR: No brew branch given" ; echo
+      usage
+      exit 3
+    fi
+    if [ "${YAML_FILE}" == "" ] && [ "${TEXT_FILE}" == "" ] && [ "${PACKAGE_LIST}" == "" ]; then
+      echo ; echo "ERROR: No packages or files given to process" ; echo
+      usage
+      exit 5
+    fi
+    get_packages | while read line
+    do
+      sync_distgit ${line}
+    done
+  ;;
+  CHECK )
+    echo "Start Status Check"
+    check_build_status
+    echo "End Status Check"
+    echo "Start Status Web Page Creation"
+    create_status_page
+    echo "End Status Web Page Creation"
+  ;;
+  BUILD )
+    if [ "${BREW_BRANCH}" == "" ] || [ "${BREW_DIST}" == "" ] ; then
+      echo ; echo "ERROR: No brew branch and/or brew dist given" ; echo
+      usage
+      exit 3
+    fi
+    if [ "${YAML_FILE}" == "" ] && [ "${TEXT_FILE}" == "" ] && [ "${PACKAGE_LIST}" == "" ]; then
+      echo ; echo "ERROR: No packages or files given to process" ; echo
+      usage
+      exit 5
+    fi
+    get_packages | while read line
+    do
+      if [ "${VERBOSE}" == "TRUE" ] ; then
+        echo "LINE: ${line}"
+      fi
+      build_package ${line}
+    done
+  ;;
+  * )
+    echo ; echo "ERROR: A command must be given" ; echo
+    usage
+    exit 4
+  ;;
+esac
+
+echo "Finished"
+exit 0
