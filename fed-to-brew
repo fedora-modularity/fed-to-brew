@@ -3,21 +3,32 @@
 ###############
 # VARIABLES
 ###############
-WORKDIR="${HOME}/fedtobrew"
 VERBOSE="FALSE"
+WORKDIR="${HOME}/fedtobrew"
+LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
+OVERALL_TXT="${WORKDIR}/results/overal-status.txt"
+OVERALL_HTML="${WORKDIR}/results/overal-status.html"
+DEP_LIST="brew git fedpkg koji rhpkg"
 COMMAND=""
-FED_GIT_CHECKOUT="master"
-FED_DIST="rawhide"
-BREW_BRANCH=""
-BREW_DIST=""
 PACKAGE_LIST=""
 CUSTOM_MESSAGE=""
 YAML_FILE=""
 TEXT_FILE=""
-LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
-OVERALL_TXT="${WORKDIR}/results/overal-status.txt"
-OVERALL_HTML="${WORKDIR}/results/overal-status.html"
-DEP_LIST="brew git fedpkg rhpkg"
+
+###############
+# Setup variables
+###############
+SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+if [ -f ${SCRIPT_HOME}/fed-to-brew.conf ] ; then
+  source ${SCRIPT_HOME}/fed-to-brew.conf
+elif [ -f /etc/fed-to-brew.conf ] ; then
+  source /etc/fed-to-brew.conf
+else
+  echo "Unable to find fed-to-brew.conf"
+  echo "Expecting it to be ${SCRIPT_HOME}/fed-to-brew.conf or /etc/fed-to-brew.conf"
+  echo "Exiting ..."
+  exit 42
+fi
 
 ###############
 # SETUP and CHECK
