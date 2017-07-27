@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ###############
-# VARIABLES
+# SCRIPT VARIABLES
 ###############
 VERBOSE="FALSE"
 WORKDIR="${HOME}/fedtobrew"
@@ -16,7 +16,7 @@ YAML_FILE=""
 TEXT_FILE=""
 
 ###############
-# Setup variables
+# GET USER SETABLE VARIABLES
 ###############
 SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 if [ -f ${SCRIPT_HOME}/fed-to-brew.conf ] ; then
@@ -254,7 +254,7 @@ sync_distgit() {
   rhpkg switch-branch ${BREW_BRANCH} >> ${LOGFILE} 2>&1
   if ! [ $? -eq 0 ] ; then
     echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
-    echo "    Not proceeding further with ${this_name} sync."
+    echo "      Not proceeding further with ${this_name} sync."
     exit 1
   fi
 
@@ -330,7 +330,7 @@ build_package() {
       rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
       if ! [ $? -eq 0 ] ; then
         echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
-        echo "    Not proceeding further with ${this_name} build."
+        echo "      Not proceeding further with ${this_name} build."
         exit 2
       fi
       rhpkg pull >/dev/null 2>&1
@@ -347,7 +347,7 @@ build_package() {
       rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
       if ! [ $? -eq 0 ] ; then
         echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
-        echo "    Not proceeding further with ${this_name} build."
+        echo "      Not proceeding further with ${this_name} build."
         exit 2
       fi
     fi
