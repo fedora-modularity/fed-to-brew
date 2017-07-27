@@ -147,7 +147,7 @@ function get_packages {
     do
       fed_nvr="$(echo ${line} | sed "s/-[0-9]*:/-/" | sed 's/.src//')"
       fed_hash="$(fedpkg gitbuildhash ${fed_nvr} 2>/dev/null)"
-      this_name="$(koji rpminfo ${line} | grep 'SRPM Path:' | awk -F'/' '{print $5}')"
+      this_name="$(koji rpminfo ${fed_nvr}.src | grep 'SRPM Path:' | awk -F'/' '{print $5}')"
       echo "${this_name} ${fed_hash} ${fed_nvr}"
     done
   elif [ "${PACKAGE_LIST}" != "" ] ; then
@@ -288,7 +288,7 @@ sync_distgit() {
   fi
   echo "${THIS_NVR} fed_rev: ${FED_COMMIT_HASH} brew_rev: ${BREW_COMMIT_HASH}" >> ${WORKDIR}/map/${this_name}
 
-  echo "  Syncing finished: ${this_name}" ; echo
+  echo "  Syncing finished: ${this_name}"
 }
 
 ###############
