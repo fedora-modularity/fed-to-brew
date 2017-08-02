@@ -1,7 +1,9 @@
 # fed-to-brew
 fed-to-brew is a multipurpose tool to help tracking, syncing, and building packages between fedora and brew.
 
---
+fed-to-brew.conf has to be in the same directory as fed-to-brew, or in /etc/.  This seperate configuration file allows you to customize variables so you do not have to keep setting them as options.
+
+## Usage
 
 Usage fed-to-brew [command] <options> <[package 1] ... [package n]>                                                                                                                    
                                                                                                                                                                                        
