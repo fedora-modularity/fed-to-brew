@@ -84,6 +84,8 @@ Multipurpose tool to help tracking, syncing, building packages between
  * --yaml [file]
    * yaml file to use for list of packages
    * Should be in the standard fedora module yaml file format.
+ * --no-remote --noremote
+   * Do not sync map ore results remotely.  Default: FALSE 
  * -v --verbose --debug
    * Be verbose, for debugging
  * -h, --help
