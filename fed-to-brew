@@ -5,7 +5,6 @@
 ###############
 VERBOSE="FALSE"
 REMOTE="TRUE"
-WORKDIR="${HOME}/fedtobrew"
 LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
 OVERALL_TXT="${WORKDIR}/results/overall-status.txt"
 OVERALL_HTML="${WORKDIR}/results/overall-status.html"
