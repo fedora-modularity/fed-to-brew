@@ -7,29 +7,29 @@ fed-to-brew.conf has to be in the same directory as fed-to-brew, or in /etc/.  T
 
 ### USER SETABLE VARIABLES
  * WORKDIR
-  * Where all the maps, results, logs, and general work gets done
-  * Example: ${HOME}/fedtobrew
+   * Where all the maps, results, logs, and general work gets done
+   * Example: ${HOME}/fedtobrew
  * FED_GIT_CHECKOUT
-  * What to checkout of the fedora dist-git to sync to brew
-  * Can be a dist-git branch or a git hash
-  * Example1: master  Example2: f26
-  * Example3: 082464dc0d06d48d2f9c4d2110e8aafe4ef1c957
+   * What to checkout of the fedora dist-git to sync to brew
+   * Can be a dist-git branch or a git hash
+   * Example1: master  Example2: f26
+   * Example3: 082464dc0d06d48d2f9c4d2110e8aafe4ef1c957
  * FED_DIST
-  * What is %dist set to in fedora
-  * Used when pulling sources for syncing
-  * Set to rawhide if using rawhide branch
-  * Example: f26
+   * What is %dist set to in fedora
+   * Used when pulling sources for syncing
+   * Set to rawhide if using rawhide branch
+   * Example: f26
  * BREW_BRANCH
-  * What branch in brew dist-git to sync into
-  * Examples: rhel-7.4
+   * What branch in brew dist-git to sync into
+   * Examples: rhel-7.4
  * BREW_DIST
-  * What is %dist set to in brew
-  * Used for checking if a package is built in brew.
-  * Example: .el7
+   * What is %dist set to in brew
+   * Used for checking if a package is built in brew.
+   * Example: .el7
  * SYNC_REMOTE
-  * Where to rsync maps and results
-  * Blank - No rsync, local only
-  * Example: SYNC_REMOTE="user@mymachine.mydomain:/home/user/fedtobrew/"
+   * Where to rsync maps and results
+   * Blank - No rsync, local only
+   * Example: SYNC_REMOTE="user@mymachine.mydomain:/home/user/fedtobrew/"
 
 ## Usage
 
@@ -39,53 +39,53 @@ Multipurpose tool to help tracking, syncing, building packages between
   fedora and brew.                                                                                                                                                                     
                                                                                                                                                                                        
 **Commands:** (there must be one command, only one)                                                                                                                                        
-    --sync                                                                                                                                                                               
-        Sync package(s) from Fedora dist-git to Brew dist-git.                                                                                                                             
-        Only syncs from one git commit, does not do entire history.                                                                                                                        
-        Mandatory: --brew-branch                                                                                                                                                           
-        Mandatory: --yaml OR --txt OR [package]                                                                                                                                                                               
-  --check                                                                                                                                                                              
-    Check the status of builds                                                                                                                                                                               
-  --build --rebuild                                                                                                                                                                               
-    Build package(s) in brew, if they have not already been built.                                                                                                                                                                               
-    Will sync packages Fedora dist-git to Brew dist-git if needed.                                                                                                                                                                               
-    Mandatory: --brew-branch                                                                                                                                                                               
-    Mandatory: --brew-dist                                                                                                                                                                               
-    Mandatory: --yaml OR --text OR [package]                                                                                                                                                                               
+ * --sync
+   * Sync package(s) from Fedora dist-git to Brew dist-git.
+   * Only syncs from one git commit, does not do entire history.
+   * Mandatory: --brew-branch
+   * Mandatory: --yaml OR --txt OR [package]
+ * --check
+   * Check the status of builds
+ * --build --rebuild
+   * Build package(s) in brew, if they have not already been built.
+   * Will sync packages Fedora dist-git to Brew dist-git if needed.
+   * Mandatory: --brew-branch
+   * Mandatory: --brew-dist
+   * Mandatory: --yaml OR --text OR [package]
 
 **Options:**
--c --checkout [branch or hash]                                                                                                                                                                               
-    What to checkout of the fedora dist-git, can be branch or hash                                                                                                                                                                               
-    Warning: If using hash, only use one package                                                                                                                                                                               
-    Default: master                                                                                                                                                                               
-    Example branch: f26                                                                                                                                                                               
-    Example hash: 082464dc0d06d48d2f9c4d2110e8aafe4ef1c957                                                                                                                                                                               
-  -bb --brew-branch [branch]                                                                                                                                                                               
-    What brew branch to sync to                                                                                                                                                                               
-  -fd --fed-dist [dist]                                                                                                                                                                               
-    What to dist to pull the fedora source from                                                                                                                                                                               
-    Should only be needed if using a hash for checkout                                                                                                                                                                               
-    Default: rawhide                                                                                                                                                                               
-    Example: f26                                                                                                                                                                               
-  -bd --brew-dist [dist]                                                                                                                                                                               
-    What dist tag to use when checking brew build status                                                                                                                                                                               
-    Example: .el7                                                                                                                                                                               
-  -m --message [message]                                                                                                                                                                               
-    Use a custom commit message for brew dist-git                                                                                                                                                                               
-  --text [file]                                                                                                                                                                               
-    Text file to use for list of packages                                                                                                                                                                               
-      Each package is on its own line in format <n-v-r>.src                                                                                                                                                                               
-      Example:acl-2.2.52-15.fc27.src                                                                                                                                                                               
-  --yaml [file]                                                                                                                                                                               
-    yaml file to use for list of packages                                                                                                                                                                               
-      Should be in the standard fedora module yaml file format.                                                                                                                                                                               
-  -v --verbose --debug                                                                                                                                                                               
-    Be verbose, for debugging                                                                                                                                                                               
-  -h, --help                                                                                                                                                                               
-    Show this options menu                                                                                                                                                                               
+ * -c --checkout [branch or hash]
+   * What to checkout of the fedora dist-git, can be branch or hash
+   * Warning: If using hash, only use one package
+   * Default: master
+   * Example branch: f26
+   * Example hash: 082464dc0d06d48d2f9c4d2110e8aafe4ef1c957
+ * -bb --brew-branch [branch]
+   * What brew branch to sync to
+ * -fd --fed-dist [dist]
+   * What to dist to pull the fedora source from
+   * Should only be needed if using a hash for checkout
+   * Default: rawhide
+   * Example: f26
+ * -bd --brew-dist [dist]
+   * What dist tag to use when checking brew build status
+   * Example: .el7
+ * -m --message [message]
+   * Use a custom commit message for brew dist-git
+ * --text [file]
+   * Text file to use for list of packages
+   * Each package is on its own line in format <n-v-r>.src
+   * Example:acl-2.2.52-15.fc27.src
+ * --yaml [file]
+   * yaml file to use for list of packages
+   * Should be in the standard fedora module yaml file format.
+ * -v --verbose --debug
+   * Be verbose, for debugging
+ * -h, --help
+   * Show this options menu
 
-**Other:**                                                                                                                                                                               
-  [package]                                                                                                                                                                               
-    If you want to do just a single file, list just the name                                                                                                                                                                               
-    Not applied if either --yaml or --text are used.                                                                                                                                                                               
+**Other:**
+ * [package]
+   * If you want to do just a single file, list just the name
+   * Not applied if either --yaml or --text are used.
 
