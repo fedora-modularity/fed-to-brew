@@ -3,6 +3,34 @@ fed-to-brew is a multipurpose tool to help tracking, syncing, and building packa
 
 fed-to-brew.conf has to be in the same directory as fed-to-brew, or in /etc/.  This seperate configuration file allows you to customize variables so you do not have to keep setting them as options.
 
+## Configuration
+
+### USER SETABLE VARIABLES
+ * WORKDIR
+  * Where all the maps, results, logs, and general work gets done
+  * Example: ${HOME}/fedtobrew
+ * FED_GIT_CHECKOUT
+  * What to checkout of the fedora dist-git to sync to brew
+  * Can be a dist-git branch or a git hash
+  * Example1: master  Example2: f26
+  * Example3: 082464dc0d06d48d2f9c4d2110e8aafe4ef1c957
+ * FED_DIST
+  * What is %dist set to in fedora
+  * Used when pulling sources for syncing
+  * Set to rawhide if using rawhide branch
+  * Example: f26
+ * BREW_BRANCH
+  * What branch in brew dist-git to sync into
+  * Examples: rhel-7.4
+ * BREW_DIST
+  * What is %dist set to in brew
+  * Used for checking if a package is built in brew.
+  * Example: .el7
+ * SYNC_REMOTE
+  * Where to rsync maps and results
+  * Blank - No rsync, local only
+  * Example: SYNC_REMOTE="user@mymachine.mydomain:/home/user/fedtobrew/"
+
 ## Usage
 
 Usage fed-to-brew [command] <options> <[package 1] ... [package n]>                                                                                                                    
@@ -26,7 +54,7 @@ Multipurpose tool to help tracking, syncing, building packages between
     Mandatory: --yaml OR --text OR [package]                                                                                                                                                                               
 
 **Options:**
-  -c --checkout [branch or hash]                                                                                                                                                                               
+-c --checkout [branch or hash]                                                                                                                                                                               
     What to checkout of the fedora dist-git, can be branch or hash                                                                                                                                                                               
     Warning: If using hash, only use one package                                                                                                                                                                               
     Default: master                                                                                                                                                                               
