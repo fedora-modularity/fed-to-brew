@@ -5,7 +5,12 @@ fed-to-brew.conf has to be in the same directory as fed-to-brew, or in /etc/.  T
 
 ## Configuration
 
-### USER SETABLE VARIABLES
+### Setup
+**fed-to-brew** can be set anywhere.  If it is not in your path, you will need to specifically call it with ./fed-to-brew
+
+**fed-to-brew.conf** needs to be either in /etc/ or in the same directory as fed-to-brew
+
+### User Setable Variables
  * WORKDIR
    * Where all the maps, results, logs, and general work gets done
    * Example: ${HOME}/fedtobrew
