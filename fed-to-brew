@@ -1,20 +1,4 @@
 #!/bin/bash
-
-###############
-# SCRIPT VARIABLES
-###############
-VERBOSE="FALSE"
-REMOTE="TRUE"
-LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
-OVERALL_TXT="${WORKDIR}/results/overall-status.txt"
-OVERALL_HTML="${WORKDIR}/results/overall-status.html"
-DEP_LIST="brew git fedpkg koji rhpkg"
-COMMAND=""
-PACKAGE_LIST=""
-CUSTOM_MESSAGE=""
-YAML_FILE=""
-TEXT_FILE=""
-
 ###############
 # GET USER SETABLE VARIABLES
 ###############
@@ -29,6 +13,22 @@ else
   echo "Exiting ..."
   exit 42
 fi
+
+###############
+# OTHER SCRIPT VARIABLES
+###############
+VERBOSE="FALSE"
+REMOTE="TRUE"
+BREW_CHECK="FALSE"
+LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
+OVERALL_TXT="${WORKDIR}/results/overall-status.txt"
+OVERALL_HTML="${WORKDIR}/results/overall-status.html"
+DEP_LIST="brew git fedpkg koji rhpkg"
+COMMAND=""
+PACKAGE_LIST=""
+CUSTOM_MESSAGE=""
+YAML_FILE=""
+TEXT_FILE=""
 
 ###############
 # SETUP and CHECK
@@ -65,7 +65,7 @@ usage() {
   echo "  --build --rebuild" >&2
   echo "    Build package(s) in brew, if they have not already been built." >&2
   echo "    Will sync packages Fedora dist-git to Brew dist-git if needed." >&2
-  echo "    Mandatory: --brew-branch" >&2REMOTE
+  echo "    Mandatory: --brew-branch" >&2
   echo "    Mandatory: --brew-dist" >&2
   echo "    Mandatory: --yaml OR --text OR [package]" >&2
   echo >&2
@@ -99,6 +99,8 @@ usage() {
   echo "    Do not sync map ore results remotely.  Default: ${REMOTE} " >&2
   echo "  -v --verbose --debug" >&2
   echo "    Be verbose, for debugging" >&2
+  echo "  --brew-check --brewcheck" >&2
+  echo "    Check if we have a brew dist-git branch before doing work" >&2
   echo "  -h, --help" >&2
   echo "    Show this options menu" >&2
   echo >&2
@@ -340,74 +342,86 @@ build_package() {
   if [ "${3}" != "" ] ; then
     this_nvr="${3}"
   fi
-  echo "  Building: ${this_name}"
-  if [ -f ${WORKDIR}/map/${this_name} ] ; then
-    test_hash="$(tail -n 1 ${WORKDIR}/map/${this_name} | awk '{print $3}')"
+  this_brew_check=""
+  if [ "${BREW_CHECK}" == "TRUE" ] ; then
+    wget -q -O /dev/null http://pkgs.devel.redhat.com/cgit/rpms/${this_name}/log/?h=${BREW_BRANCH}
+    if [ $? -gt 0 ] ; then
+      this_brew_check="FAILED"
+    fi
   fi
-  if [ "${VERBOSE}" == "TRUE" ] ; then
-    echo "    NVR: ${this_nvr}"
-    echo "    Name: ${this_name}"
-    echo "    Fed Hash: ${fed_hash}"
-    echo "    Old Hash: ${test_hash}"
-  fi
-  if [ "${test_hash}" == "${fed_hash}" ] ; then
-    echo "    Already synced from Fedora to Brew dist-git"
+  if [ "${this_brew_check}" == "FAILED" ] ; then
+    echo "  NO BREW DIST-GIT FOR: ${this_name}"
+    echo
   else
-    echo "    Syncing from Fedora to Brew dist-git"
-    sync_distgit ${this_name} ${fed_hash}
-  fi
-  # Everything should be setup by now, lets start the build
-  if [ -f ${WORKDIR}/logs/${this_name}.build ] ; then
-    echo "    Already Building: ${this_name}"
-  else
-    echo "    Checking build status"
-    if [ -d ${WORKDIR}/brew/${this_name} ] ; then
-      cd ${WORKDIR}/brew/${this_name}
-      rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
-      if ! [ $? -eq 0 ] ; then
-        echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
-        echo "      Not proceeding further with ${this_name} build."
-        exit 2
-      fi
-      rhpkg pull >/dev/null 2>&1
+    echo "  Building: ${this_name}"
+    if [ -f ${WORKDIR}/map/${this_name} ] ; then
+      test_hash="$(tail -n 1 ${WORKDIR}/map/${this_name} | awk '{print $3}')"
+    fi
+    if [ "${VERBOSE}" == "TRUE" ] ; then
+      echo "    NVR: ${this_nvr}"
+      echo "    Name: ${this_name}"
+      echo "    Fed Hash: ${fed_hash}"
+      echo "    Old Hash: ${test_hash}"
+    fi
+    if [ "${test_hash}" == "${fed_hash}" ] ; then
+      echo "    Already synced from Fedora to Brew dist-git"
     else
-      cd ${WORKDIR}/brew
-      rhpkg clone ${this_name} >/dev/null 2>&1
-      if ! [ $? -eq 0 ] ; then
-        echo "    Unable to clone ${this_name}"
-        echo "      You might not have permissions, or"
-        echo "      ${this_name} might not be a package."
-        exit 2
-      fi
-      cd ${WORKDIR}/brew/${this_name}
-      rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
-      if ! [ $? -eq 0 ] ; then
-        echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
-        echo "      Not proceeding further with ${this_name} build."
-        exit 2
-      fi
+      echo "    Syncing from Fedora to Brew dist-git"
+      sync_distgit ${this_name} ${fed_hash}
     fi
-    test_nvr="$(rhpkg verrel 2>/dev/null | sed "s|.el[0-9]|${BREW_DIST}|")"
-    if [ "${test_nvr}" == "" ] ; then
-      test_nvr="${this_name}-$(grep ^Version: *.spec | awk '{print $2}')-$(grep ^Release: *.spec | awk '{print $2}' | sed "s/%{?dist}/${BREW_DIST}/")"
-    fi
-    brew_build="$(brew buildinfo ${test_nvr})"
-    if echo "${brew_build}" | grep -q "No such build:" ; then
-      echo "    Building: ${test_nvr}"
-      rhpkg build --skip-nvr-check --nowait >> ${WORKDIR}/logs/${this_name}.build 2>&1
-    elif echo "${brew_build}" | grep -q "FAILED" ; then
-      echo "    Last build failed."
-      echo "    Building Again: ${test_nvr}"
-      rhpkg build --skip-nvr-check --nowait >> ${WORKDIR}/logs/${this_name}.build 2>&1
+    # Everything should be setup by now, lets start the build
+    if [ -f ${WORKDIR}/logs/${this_name}.build ] ; then
+      echo "    Already Building: ${this_name}"
     else
-      echo "    No need to start new build: ${test_nvr}"
-      echo "      $(echo "${brew_build}" | grep "State:")"
-      echo "      $(echo "${brew_build}" | grep "Finished:")"
-      cd ${WORKDIR}/brew
-      rm -rf ${WORKDIR}/brew/${this_name}
+      echo "    Checking build status"
+      if [ -d ${WORKDIR}/brew/${this_name} ] ; then
+        cd ${WORKDIR}/brew/${this_name}
+        rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
+        if ! [ $? -eq 0 ] ; then
+          echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
+          echo "      Not proceeding further with ${this_name} build."
+          exit 2
+        fi
+        rhpkg pull >/dev/null 2>&1
+      else
+        cd ${WORKDIR}/brew
+        rhpkg clone ${this_name} >/dev/null 2>&1
+        if ! [ $? -eq 0 ] ; then
+          echo "    Unable to clone ${this_name}"
+          echo "      You might not have permissions, or"
+          echo "      ${this_name} might not be a package."
+          exit 2
+        fi
+        cd ${WORKDIR}/brew/${this_name}
+        rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
+        if ! [ $? -eq 0 ] ; then
+          echo "    Unable to checkout ${this_name} ${BREW_BRANCH}"
+          echo "      Not proceeding further with ${this_name} build."
+          exit 2
+        fi
+      fi
+      test_nvr="$(rhpkg verrel 2>/dev/null | sed "s|.el[0-9]|${BREW_DIST}|")"
+      if [ "${test_nvr}" == "" ] ; then
+        test_nvr="${this_name}-$(grep ^Version: *.spec | awk '{print $2}')-$(grep ^Release: *.spec | awk '{print $2}' | sed "s/%{?dist}/${BREW_DIST}/")"
+      fi
+      brew_build="$(brew buildinfo ${test_nvr})"
+      if echo "${brew_build}" | grep -q "No such build:" ; then
+        echo "    Building: ${test_nvr}"
+        rhpkg build --skip-nvr-check --nowait >> ${WORKDIR}/logs/${this_name}.build 2>&1
+      elif echo "${brew_build}" | grep -q "FAILED" ; then
+        echo "    Last build failed."
+        echo "    Building Again: ${test_nvr}"
+        rhpkg build --skip-nvr-check --nowait >> ${WORKDIR}/logs/${this_name}.build 2>&1
+      else
+        echo "    No need to start new build: ${test_nvr}"
+        echo "      $(echo "${brew_build}" | grep "State:")"
+        echo "      $(echo "${brew_build}" | grep "Finished:")"
+        cd ${WORKDIR}/brew
+        rm -rf ${WORKDIR}/brew/${this_name}
+      fi
     fi
+    echo "  Building finished: ${this_name}" ; echo
   fi
-  echo "  Building finished: ${this_name}" ; echo
 }
 ###############
 # Check build status
@@ -568,6 +582,9 @@ case $key in
     --no-remote | --noremote)
       export REMOTE="FALSE"
     ;;
+    --brew-check | --brewcheck )
+      export BREW_CHECK="TRUE"
+    ;;
     -v | --verbose | --debug)
       export VERBOSE="TRUE"
     ;;
@@ -617,6 +634,7 @@ case "${COMMAND}" in
       exit 5
     fi
     if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "Syncing mapping from remote area"
       rsync_in map
     fi
     get_packages | while read line
@@ -624,6 +642,7 @@ case "${COMMAND}" in
       sync_distgit ${line}
     done
     if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "Syncing mapping to remote area"
       rsync_out map
     fi
   ;;
@@ -654,6 +673,10 @@ case "${COMMAND}" in
       usage
       exit 5
     fi
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "Syncing mapping from remote area"
+      rsync_in map
+    fi
     get_packages | while read line
     do
       if [ "${VERBOSE}" == "TRUE" ] ; then
@@ -661,6 +684,10 @@ case "${COMMAND}" in
       fi
       build_package ${line}
     done
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "Syncing mapping to remote area"
+      rsync_out map
+    fi
   ;;
   * )
     echo ; echo "ERROR: A command must be given" ; echo
