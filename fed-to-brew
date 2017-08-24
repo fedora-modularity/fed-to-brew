@@ -21,11 +21,12 @@ VERBOSE="FALSE"
 REMOTE="TRUE"
 BREW_CHECK="FALSE"
 LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
+LOCK_FILE="${WORKDIR}/logs/lockfile-$(date +%Y-%m-%d)"
 OVERALL_TXT="${WORKDIR}/results/overall-status.txt"
 OVERALL_HTML="${WORKDIR}/results/overall-status.html"
 JOB_TRACKER="${WORKDIR}/job-tracker-$$"
 PARALLEL_JOBS=4
-DEP_LIST="brew git fedpkg koji rhpkg"
+DEP_LIST="brew git fedpkg koji rhpkg flock"
 COMMAND=""
 PACKAGE_LIST=""
 CUSTOM_MESSAGE=""
@@ -36,6 +37,7 @@ TEXT_FILE=""
 # SETUP and CHECK
 ###############
 mkdir -vp ${WORKDIR}/{brew,fed,logs,map,results,tmp}
+touch ${LOCK_FILE}
 for this_dep in ${DEP_LIST}
 do
   test_path="$(which ${this_dep} 2>/dev/null)"
@@ -181,17 +183,20 @@ function get_packages {
 # Update overall status in results directory
 ###############
 update_overall_status() {
-    if [ "${VERBOSE}" == "TRUE" ] ; then
-      echo "    this_name: ${this_name}"
-      echo "    this_status: ${this_status}"
-      echo "    this_nvr: ${this_nvr}"
-      echo "    task_number: ${task_number}"
+  update_name="${1}"
+  update_status="${2}"
+  update_task_number="${3}"
+  update_nvr="${4}"
+  if [ "${VERBOSE}" == "TRUE" ] ; then
+      echo "    update_name: ${update_name}"
+      echo "    update_nvr: ${update_nvr}"
+      echo "    update_task_number: ${update_task_number}"
+      echo "    update_status: ${update_status}"
     fi
-
-    if grep -q "^${this_name}" ${OVERALL_TXT} ; then
-      sed -i "s|^${this_name} .*|${this_name} ${this_status} ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number}|" ${OVERALL_TXT}
+    if grep -q "^${update_name} " ${OVERALL_TXT} ; then
+      flock ${LOCK_FILE} sed -i "s|^${update_name} .*|${update_name} ${update_status} ${update_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${update_task_number}|" ${OVERALL_TXT}
     else
-      echo "${this_name} ${this_status} ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number}" >> ${OVERALL_TXT}
+      flock ${LOCK_FILE} echo "${update_name} ${update_status} ${update_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${update_task_number}" >> ${OVERALL_TXT}
     fi
 }
 
@@ -238,23 +243,25 @@ sync_distgit() {
   if [ "${fed_hash}" == "" ] ; then
     fed_hash="${FED_GIT_CHECKOUT}"
   fi
-  echo "  [${this_name}] Syncing dist-git start"
+  echo "    [${this_name}] Syncing dist-git start"
   # Checkout Fedora dist-git
-  echo "     [${this_name}] Download and Setup Fedora dist-git repo"
+  echo "      [${this_name}] Download and Setup Fedora dist-git repo"
   cd ${WORKDIR}/fed
   if [ -d ${this_name} ] ; then
     rm -rf ${this_name}
   fi
   fedpkg clone ${this_name} >> ${LOGFILE} 2>&1
   if ! [ $? -eq 0 ] ; then
-    echo "    [${this_name}] Unable to clone"
-    echo "      [${this_name}] You might not have permissions, or might not be a package."
+    echo "      [${this_name}] Unable to clone"
+    echo "        [${this_name}] You might not have permissions, or might not be a package."
+    end_job ${job_number}
     exit 1
   fi
   cd ${this_name}
   git checkout ${fed_hash} >> ${LOGFILE} 2>&1
   if ! [ $? -eq 0 ] ; then
-    echo "    [${this_name}] Unable to checkout ${this_name} ${fed_hash}"
+    echo "      [${this_name}] Unable to checkout ${this_name} ${fed_hash}"
+    end_job ${job_number}
     exit 1
   fi
   fedpkg sources >> ${LOGFILE} 2>&1
@@ -262,7 +269,8 @@ sync_distgit() {
     # For hashtags we have to pass a dist, assuming rawhide
     fedpkg --dist ${FED_DIST} sources >> ${LOGFILE} 2>&1
     if ! [ $? -eq 0 ] ; then
-      echo "    [${this_name}] Error: We are unable to get our sources for ${this_name}"
+      echo "      [${this_name}] Error: We are unable to get our sources for ${this_name}"
+      end_job ${job_number}
       exit 1
     fi
   fi
@@ -271,41 +279,43 @@ sync_distgit() {
   else
     COMMIT_MESSAGE="${CUSTOM_MESSAGE}"
   fi
-  THIS_NVR="$(fedpkg --release master verrel 2>/dev/null | sed 's|.fc27|.dist|')"
+  THIS_NVR="$(fedpkg --release master verrel 2>/dev/null | sed 's|.fc2[0-9]|.dist|')"
   if [ "${THIS_NVR}" == "" ] ; then
     THIS_NVR="${this_name}"
   fi
   FED_COMMIT_HASH="$(git log -n1 --format=%H)"
 
   # Checkout Brew dist-git
-  echo "    [${this_name}] Download and Setup Brew dist-git repo"
+  echo "      [${this_name}] Download and Setup Brew dist-git repo"
   cd ${WORKDIR}/brew
   if [ -d ${this_name} ] ; then
     rm -rf ${this_name}
   fi
   rhpkg clone ${this_name} >> ${LOGFILE} 2>&1
   if ! [ $? -eq 0 ] ; then
-    echo "    [${this_name}] Unable to clone ${this_name}"
-    echo "      [${this_name}] You might not have permissions, or might not be a package."
+    echo "      [${this_name}] Unable to clone ${this_name}"
+    echo "        [${this_name}] You might not have permissions, or might not be a package."
+    end_job ${job_number}
     exit 1
   fi
   cd ${this_name}
   rhpkg switch-branch ${BREW_BRANCH} >> ${LOGFILE} 2>&1
   if ! [ $? -eq 0 ] ; then
-    echo "    [${this_name}] Unable to checkout ${this_name} ${BREW_BRANCH}"
-    echo "      [${this_name}] Not proceeding further with ${this_name} sync."
+    echo "      [${this_name}] Unable to checkout ${this_name} ${BREW_BRANCH}"
+    echo "        [${this_name}] Not proceeding further with ${this_name} sync."
+    end_job ${job_number}
     exit 1
   fi
 
   # rsync fed to brew
-  echo "    [${this_name}] Syncing from Fed dist-git to Brew dist-git"
+  echo "      [${this_name}] Syncing from Fed dist-git to Brew dist-git"
   rsync -avH --exclude=.git/ --delete ${WORKDIR}/fed/${this_name}/ ${WORKDIR}/brew/${this_name}/ >> ${LOGFILE} 2>&1
   # autogenerated rpms often have the .spec file and other files in .gitignore, take it out
   #sed -i '/.spec$/d' ${WORKDIR}/brew/${this_name}/.gitignore
   rm -f ${WORKDIR}/brew/${this_name}/.gitignore
 
   # Push up to brew dist-git
-  echo "    [${this_name}] Committing and Uploading to Brew dist-git"
+  echo "      [${this_name}] Committing and Uploading to Brew dist-git"
   cd ${WORKDIR}/brew/${this_name}
   if grep -q SHA512 sources ; then
     source_list="$(cat sources | awk -F"(" '{print $2}' | awk -F")" '{print $1}' ORS=' ')"
@@ -313,8 +323,8 @@ sync_distgit() {
     source_list="$(cat sources | awk '{print $2}' ORS=' ')"
   fi
   if [ "${VERBOSE}" == "TRUE" ] ; then
-    echo "source_list: ${source_list}"
-    echo "COMMIT_MESSAGE: ${COMMIT_MESSAGE}"
+    echo "    [${this_name}] source_list: ${source_list}"
+    echo "    [${this_name}] COMMIT_MESSAGE: ${COMMIT_MESSAGE}"
   fi
   rhpkg new-sources ${source_list} >> ${LOGFILE} 2>&1
   git add -A >> ${LOGFILE} 2>&1
@@ -324,13 +334,13 @@ sync_distgit() {
 
   # Document what hashes matchs
   if [ "${VERBOSE}" == "TRUE" ] ; then
-    echo "THIS_NVR: ${THIS_NVR}"
-    echo "FED_COMMIT_HASH: ${FED_COMMIT_HASH}"
-    echo "BREW_COMMIT_HASH: ${BREW_COMMIT_HASH}"
+    echo "    [${this_name}] THIS_NVR: ${THIS_NVR}"
+    echo "    [${this_name}] FED_COMMIT_HASH: ${FED_COMMIT_HASH}"
+    echo "    [${this_name}] BREW_COMMIT_HASH: ${BREW_COMMIT_HASH}"
   fi
   echo "${THIS_NVR} fed_rev: ${FED_COMMIT_HASH} brew_rev: ${BREW_COMMIT_HASH}" >> ${WORKDIR}/map/${this_name}
 
-  echo "  [${this_name}] Syncing finished"
+  echo "    [${this_name}] Syncing End"
   if [ "${job_type}" == "newjob" ] ; then
     end_job ${job_number}
   fi
@@ -357,7 +367,6 @@ build_package() {
   if [ "${this_brew_check}" == "FAILED" ] ; then
     echo "  [${this_name}] NO BREW DIST-GIT FOR: ${this_name}"
     echo "${this_name}" >> ${WORKDIR}/logs/request-needed-$(date +%Y-%m-%d)
-    echo
   else
     echo "  [${this_name}] Build Setup Start"
     if [ -f ${WORKDIR}/map/${this_name} ] ; then
@@ -386,6 +395,7 @@ build_package() {
         if ! [ $? -eq 0 ] ; then
           echo "    [${this_name}] Unable to checkout ${this_name} ${BREW_BRANCH}"
           echo "      [${this_name}] Not proceeding further with ${this_name} build."
+          end_job ${job_number}
           exit 2
         fi
         rhpkg pull >/dev/null 2>&1
@@ -396,6 +406,7 @@ build_package() {
           echo "    [${this_name}] Unable to clone ${this_name}"
           echo "      [${this_name}] You might not have permissions, or"
           echo "      [${this_name}] ${this_name} might not be a package."
+          end_job ${job_number}
           exit 2
         fi
         cd ${WORKDIR}/brew/${this_name}
@@ -403,6 +414,7 @@ build_package() {
         if ! [ $? -eq 0 ] ; then
           echo "    [${this_name}] Unable to checkout ${this_name} ${BREW_BRANCH}"
           echo "      [${this_name}] Not proceeding further with ${this_name} build."
+          end_job ${job_number}
           exit 2
         fi
       fi
@@ -426,9 +438,9 @@ build_package() {
         rm -rf ${WORKDIR}/brew/${this_name}
       fi
     fi
-    echo "  [${this_name}] Build Setup Finished"
-    end_job ${job_number}
+    echo "  [${this_name}] Build Setup End"
   fi
+  end_job ${job_number}
 }
 
 ###############
@@ -439,13 +451,13 @@ check_build_status() {
   build_log="${2}"
   this_name="$(echo ${build_log} | sed 's|.build||')"
   task_number="$(grep Created ${build_log} | awk '{print $3}')"
-  echo "  [${this_name}] Check Started: ${this_name}"
+  echo "  [${this_name}] Check Start"
   if [ "${task_number}" == "" ] ; then
     echo "    [${this_name}] ERROR: No task_number found"
     this_nvr="ERROR"
     task_number="ERROR"
     this_status="ERROR"
-    update_overall_status
+    update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
   else
     this_taskinfo="$(brew taskinfo ${task_number})"
     this_state="$(echo "${this_taskinfo}" | grep State: | awk '{print $2}')"
@@ -458,22 +470,22 @@ check_build_status() {
       fi
       if [ "${this_state}" == "failed" ] ; then
         this_status="FAILURE"
-        echo "      [${this_name}] Downloading logs for failed build."
+        echo "      [${this_name}] Downloading failed build logs."
         brew download-logs -r -d ${WORKDIR}/results/${this_name}/${task_number} ${task_number} > /dev/null 2>&1
       fi
       if [ "${this_state}" == "canceled" ] ; then
         this_status="FAILURE"
       fi
-      update_overall_status
+      update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
       echo "${this_status}: ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number}" >> ${WORKDIR}/results/${this_name}/status.txt
       mv ${WORKDIR}/logs/${build_log} ${WORKDIR}/results/${this_name}/${task_number}/${build_log}.txt
       rm -rf ${WORKDIR}/brew/${this_name}
     else
       this_status="BUILDING"
-      update_overall_status
+      update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
     fi
   fi
-  echo "  [${this_name}] Check Finished"
+  echo "  [${this_name}] Check End"
   end_job ${job_number}
 }
 
@@ -784,7 +796,7 @@ esac
 ###############
 # CLEANUP
 ###############
-rm -f ${JOB_TRACKER}
+rm -f ${JOB_TRACKER} ${LOCK_FILE}
 
 echo "Finished"
 exit 0
