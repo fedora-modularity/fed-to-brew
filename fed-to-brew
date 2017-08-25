@@ -566,9 +566,7 @@ start_job() {
       HAVE_JOB="TRUE"
     fi
   done
-  new_line="$(head -n 1 ${JOB_TRACKER} )"
-  job_number="$(echo $new_line|awk -F':' '{print $2}' )"
-  sed -i "/${new_line}/d" ${JOB_TRACKER}
+  job_number=$(flock ${JOB_TRACKER} -c "head -n 1 ${JOB_TRACKER} |awk -F':' '{print $2}' ; sed -i '1d' ${JOB_TRACKER}")
   echo "${job_number}"
 }
 
@@ -579,7 +577,7 @@ end_job() {
   if [ "${VERBOSE}" == "TRUE" ] ; then
     echo "JOB ENDING: ${1}"
   fi
-  echo ":${1}:" >> ${JOB_TRACKER}
+  flock ${JOB_TRACKER} echo ":${1}:" >> ${JOB_TRACKER}
 }
 
 ###############
