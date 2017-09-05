@@ -321,6 +321,8 @@ sync_distgit() {
   cd ${WORKDIR}/brew/${this_name}
   if grep -q SHA512 sources ; then
     source_list="$(cat sources | awk -F"(" '{print $2}' | awk -F")" '{print $1}' ORS=' ')"
+  elif grep -q ^MD5 sources ; then
+    source_list="$(cat sources | awk -F"(" '{print $2}' | awk -F")" '{print $1}' ORS=' ')"
   else
     source_list="$(cat sources | awk '{print $2}' ORS=' ')"
   fi
