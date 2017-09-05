@@ -19,11 +19,13 @@ fi
 ###############
 VERBOSE="FALSE"
 REMOTE="TRUE"
-BREW_CHECK="FALSE"
+BREW_CHECK="TRUE"
 LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
 LOCK_FILE="${WORKDIR}/logs/lockfile-$(date +%Y-%m-%d)"
 OVERALL_TXT="${WORKDIR}/results/overall-status.txt"
 OVERALL_HTML="${WORKDIR}/results/overall-status.html"
+BUILDING_HTML="${WORKDIR}/results/building-status.html"
+FAILURE_HTML="${WORKDIR}/results/failure-status.html"
 JOB_TRACKER="${WORKDIR}/job-tracker-$$"
 PARALLEL_JOBS=4
 DEP_LIST="brew git fedpkg koji rhpkg flock"
@@ -365,7 +367,7 @@ build_package() {
     fi
   fi
   if [ "${this_brew_check}" == "FAILED" ] ; then
-    echo "  [${this_name}] NO BREW DIST-GIT FOR: ${this_name}"
+    echo "  [${this_name}] BREW DIST-GIT IS NOT SETUP YET"
     echo "${this_name}" >> ${WORKDIR}/logs/request-needed-$(date +%Y-%m-%d)
   else
     echo "  [${this_name}] Build Setup Start"
@@ -386,56 +388,43 @@ build_package() {
     fi
     # Everything should be setup by now, lets start the build
     if [ -f ${WORKDIR}/logs/${this_name}.build ] ; then
-      echo "    [${this_name}] Already Building: ${this_name}"
+      echo "    [${this_name}] Already Building"
     else
-      echo "    [${this_name}] Checking build status"
-      if [ -d ${WORKDIR}/brew/${this_name} ] ; then
-        cd ${WORKDIR}/brew/${this_name}
-        rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
-        if ! [ $? -eq 0 ] ; then
-          echo "    [${this_name}] Unable to checkout ${this_name} ${BREW_BRANCH}"
-          echo "      [${this_name}] Not proceeding further with ${this_name} build."
-          end_job ${job_number}
-          exit 2
-        fi
-        rhpkg pull >/dev/null 2>&1
+      if grep "fednvr:${this_nvr} fedhash:${fed_hash}" ${WORKDIR}/results/${this_name}/status.txt 2>/dev/null | grep -q SUCCESS:  ; then
+        echo "    [${this_name}] Already Successfully Built"
       else
-        cd ${WORKDIR}/brew
-        rhpkg clone ${this_name} >/dev/null 2>&1
-        if ! [ $? -eq 0 ] ; then
-          echo "    [${this_name}] Unable to clone ${this_name}"
-          echo "      [${this_name}] You might not have permissions, or"
-          echo "      [${this_name}] ${this_name} might not be a package."
-          end_job ${job_number}
-          exit 2
+        echo "    [${this_name}] Build Needed - Setting up"
+        if [ -d ${WORKDIR}/brew/${this_name} ] ; then
+          cd ${WORKDIR}/brew/${this_name}
+          rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
+          if ! [ $? -eq 0 ] ; then
+            echo "    [${this_name}] Unable to checkout ${this_name} ${BREW_BRANCH}"
+            echo "      [${this_name}] Not proceeding further with ${this_name} build."
+            end_job ${job_number}
+            exit 2
+          fi
+          rhpkg pull >/dev/null 2>&1
+        else
+          cd ${WORKDIR}/brew
+          rhpkg clone ${this_name} >/dev/null 2>&1
+          if ! [ $? -eq 0 ] ; then
+            echo "    [${this_name}] Unable to clone ${this_name}"
+            echo "      [${this_name}] You might not have permissions, or"
+            echo "      [${this_name}] ${this_name} might not be a package."
+            end_job ${job_number}
+            exit 2
+          fi
+          cd ${WORKDIR}/brew/${this_name}
+          rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
+          if ! [ $? -eq 0 ] ; then
+            echo "    [${this_name}] Unable to checkout ${this_name} ${BREW_BRANCH}"
+            echo "      [${this_name}] Not proceeding further with ${this_name} build."
+            end_job ${job_number}
+            exit 2
+          fi
         fi
-        cd ${WORKDIR}/brew/${this_name}
-        rhpkg switch-branch ${BREW_BRANCH} >/dev/null 2>&1
-        if ! [ $? -eq 0 ] ; then
-          echo "    [${this_name}] Unable to checkout ${this_name} ${BREW_BRANCH}"
-          echo "      [${this_name}] Not proceeding further with ${this_name} build."
-          end_job ${job_number}
-          exit 2
-        fi
-      fi
-      test_nvr="$(rhpkg verrel 2>/dev/null | sed "s|.el[0-9]|${BREW_DIST}|")"
-      if [ "${test_nvr}" == "" ] ; then
-        test_nvr="${this_name}-$(grep ^Version: *.spec | awk '{print $2}')-$(grep ^Release: *.spec | awk '{print $2}' | sed "s/%{?dist}/${BREW_DIST}/")"
-      fi
-      brew_build="$(brew buildinfo ${test_nvr})"
-      if echo "${brew_build}" | grep -q "No such build:" ; then
-        echo "    [${this_name}] Building: ${test_nvr}"
+        echo "${this_name} fednvr:${this_nvr} fedhash:${fed_hash} " >> ${WORKDIR}/logs/${this_name}.build
         rhpkg build --skip-nvr-check --nowait >> ${WORKDIR}/logs/${this_name}.build 2>&1
-      elif echo "${brew_build}" | grep -q "FAILED" ; then
-        echo "    [${this_name}] Last build failed."
-        echo "    [${this_name}] Building Again: ${test_nvr}"
-        rhpkg build --skip-nvr-check --nowait >> ${WORKDIR}/logs/${this_name}.build 2>&1
-      else
-        echo "    [${this_name}] No need to start new build: ${test_nvr}"
-        echo "      [${this_name}] $(echo "${brew_build}" | grep "State:")"
-        echo "      [${this_name}] $(echo "${brew_build}" | grep "Finished:")"
-        cd ${WORKDIR}/brew
-        rm -rf ${WORKDIR}/brew/${this_name}
       fi
     fi
     echo "  [${this_name}] Build Setup End"
@@ -449,6 +438,7 @@ build_package() {
 check_build_status() {
   job_number="${1}"
   build_log="${2}"
+  this_stat_line="$(head -n1 ${build_log})"
   this_name="$(echo ${build_log} | sed 's|.build||')"
   task_number="$(grep Created ${build_log} | awk '{print $3}')"
   echo "  [${this_name}] Check Start"
@@ -477,7 +467,8 @@ check_build_status() {
         this_status="FAILURE"
       fi
       update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
-      echo "${this_status}: ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number}" >> ${WORKDIR}/results/${this_name}/status.txt
+      this_fed_info="$(echo ${this_stat_line} | awk '{print $2 " " $3}')"
+      echo "${this_status}: ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number} ${this_fed_info}" >> ${WORKDIR}/results/${this_name}/status.txt
       mv ${WORKDIR}/logs/${build_log} ${WORKDIR}/results/${this_name}/${task_number}/${build_log}.txt
       rm -rf ${WORKDIR}/brew/${this_name}
     else
@@ -499,24 +490,35 @@ create_status_page() {
   overall_success="$(grep SUCCESS ${OVERALL_TXT} |wc -l)"
   overall_failure="$(grep -e FAILURE -e ERROR ${OVERALL_TXT} |wc -l)"
 
-  rm -f ${OVERALL_HTML}
-  echo "<html>" >> ${OVERALL_HTML}
-  echo "<head><title>RHEL Build Progress</title></head>" >> ${OVERALL_HTML}
-  echo "<body>" >> ${OVERALL_HTML}
-  echo "<h1>RHEL Build Progress</h1>" >> ${OVERALL_HTML}
-  echo "<p>Page updated: " >> ${OVERALL_HTML}
-  date --utc >> ${OVERALL_HTML}
-  echo "</p>" >> ${OVERALL_HTML}
-  echo "<h2>Totals</h2>" >> ${OVERALL_HTML}
-  echo "<p>" >> ${OVERALL_HTML}
-  echo "Building: <strong>${overall_building}</strong><br>" >> ${OVERALL_HTML}
-  echo "Success: <strong>${overall_success}</strong><br>" >> ${OVERALL_HTML}
-  echo "Failure: <strong>${overall_failure}</strong><br>" >> ${OVERALL_HTML}
-  echo "Total: <strong>${overall_total}</strong><br>" >> ${OVERALL_HTML}
-  echo "</p>" >> ${OVERALL_HTML}
-  echo "<h2>Details</h2>" >> ${OVERALL_HTML}
-  echo "<table border=1 style="width:100%">" >> ${OVERALL_HTML}
-  echo "<tr><th>Name</th><th>STATUS</th><th>NVR</th><th>Build URL</th></tr>" >> ${OVERALL_HTML}
+  for this_type in Overall Building Failure
+  do
+    if [ "${this_type}" == "Overall" ] ; then
+      this_html="${OVERALL_HTML}"
+    elif [ "${this_type}" == "Building" ] ; then
+      this_html="${BUILDING_HTML}"
+    else
+      this_html="${FAILURE_HTML}"
+    fi
+
+    rm -f ${this_html}
+    echo "<html>" >> ${this_html}
+    echo "<head><title>RHEL Build Progress ${this_type}</title></head>" >> ${this_html}
+    echo "<body>" >> ${this_html}
+    echo "<h1>RHEL ${this_type} Build Progress: ${BREW_DIST}</h1>" >> ${this_html}
+    echo "<p>Page updated: " >> ${this_html}
+    date --utc >> ${this_html}
+    echo "</p>" >> ${this_html}
+    echo "<h2>Totals</h2>" >> ${this_html}
+    echo "<p>" >> ${this_html}
+    echo "<a href=\"building-status.html\">Building:</a> <strong>${overall_building}</strong><br>" >> ${this_html}
+    echo "<a href=\"overall-status.html\">Success:</a> <strong>${overall_success}</strong><br>" >> ${this_html}
+    echo "<a href=\"failure-status.html\">Failure:</a> <strong>${overall_failure}</strong><br>" >> ${this_html}
+    echo "Total: <strong>${overall_total}</strong><br>" >> ${this_html}
+    echo "</p>" >> ${this_html}
+    echo "<h2>Details</h2>" >> ${this_html}
+    echo "<table border=1 style="width:100%">" >> ${this_html}
+    echo "<tr><th>Name</th><th>STATUS</th><th>NVR</th><th>Build URL</th></tr>" >> ${this_html}
+  done
 
   cat ${OVERALL_TXT} | while read line
   do
@@ -543,11 +545,19 @@ create_status_page() {
           this_color="#00FFFF"
     fi
     echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${OVERALL_HTML}
+    if [ "${this_status}" == "BUILDING" ] ; then
+      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${BUILDING_HTML}
+    elif [ "${this_status}" == "FAILURE" ] ; then
+      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${FAILURE_HTML}
+    fi
   done
 
-  echo "</table>" >> ${OVERALL_HTML}
-  echo "</body>" >> ${OVERALL_HTML}
-  echo "</html>" >> ${OVERALL_HTML}
+  for this_html in ${OVERALL_HTML} ${BUILDING_HTML} ${FAILURE_HTML}
+  do
+    echo "</table>" >> ${this_html}
+    echo "</body>" >> ${this_html}
+    echo "</html>" >> ${this_html}
+  done
 }
 
 ###############
@@ -566,7 +576,7 @@ start_job() {
       HAVE_JOB="TRUE"
     fi
   done
-  job_number=$(flock ${JOB_TRACKER} -c "head -n 1 ${JOB_TRACKER} |awk -F':' '{print $2}' ; sed -i '1d' ${JOB_TRACKER}")
+  job_number=$(flock ${JOB_TRACKER} -c "head -n 1 ${JOB_TRACKER} | cut -d':' -f2 ; sed -i '1d' ${JOB_TRACKER}")
   echo "${job_number}"
 }
 
@@ -683,6 +693,7 @@ if [ "${VERBOSE}" == "TRUE" ] ; then
   echo "FED_DIST: ${FED_DIST}"
   echo "BREW_BRANCH: ${BREW_BRANCH}"
   echo "BREW_DIST: ${BREW_DIST}"
+  echo "BREW_CHECK: ${BREW_CHECK}"
   echo "PACKAGE_LIST: ${PACKAGE_LIST}"
   echo "CUSTOM_MESSAGE: ${CUSTOM_MESSAGE}"
   echo "LOGFILE: ${LOGFILE}"
