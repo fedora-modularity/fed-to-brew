@@ -196,9 +196,9 @@ update_overall_status() {
       echo "    update_status: ${update_status}"
     fi
     if grep -q "^${update_name} " ${OVERALL_TXT} ; then
-      flock ${LOCK_FILE} sed -i "s|^${update_name} .*|${update_name} ${update_status} ${update_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${update_task_number}|" ${OVERALL_TXT}
+      flock ${LOCK_FILE} sed -i "s|^${update_name} .*|${update_name} ${update_status} ${update_nvr} ${BREW_WEB_URL}/taskinfo?taskID=${update_task_number}|" ${OVERALL_TXT}
     else
-      flock ${LOCK_FILE} echo "${update_name} ${update_status} ${update_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${update_task_number}" >> ${OVERALL_TXT}
+      flock ${LOCK_FILE} echo "${update_name} ${update_status} ${update_nvr} ${BREW_WEB_URL}/taskinfo?taskID=${update_task_number}" >> ${OVERALL_TXT}
     fi
 }
 
@@ -363,7 +363,7 @@ build_package() {
   fi
   this_brew_check=""
   if [ "${BREW_CHECK}" == "TRUE" ] ; then
-    wget -q -O /dev/null http://pkgs.devel.redhat.com/cgit/rpms/${this_name}/log/?h=${BREW_BRANCH}
+    wget -q -O /dev/null ${BREW_DISTGIT_URL}/rpms/${this_name}/log/?h=${BREW_BRANCH}
     if [ $? -gt 0 ] ; then
       this_brew_check="FAILED"
     fi
@@ -470,7 +470,7 @@ check_build_status() {
       fi
       update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
       this_fed_info="$(echo ${this_stat_line} | awk '{print $2 " " $3}')"
-      echo "${this_status}: ${this_nvr} https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=${task_number} ${this_fed_info}" >> ${WORKDIR}/results/${this_name}/status.txt
+      echo "${this_status}: ${this_nvr} ${BREW_WEB_URL}/taskinfo?taskID=${task_number} ${this_fed_info}" >> ${WORKDIR}/results/${this_name}/status.txt
       mv ${WORKDIR}/logs/${build_log} ${WORKDIR}/results/${this_name}/${task_number}/${build_log}.txt
       rm -rf ${WORKDIR}/brew/${this_name}
     else

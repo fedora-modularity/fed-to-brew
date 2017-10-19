@@ -24,6 +24,12 @@ fed-to-brew.conf has to be in the same directory as fed-to-brew, or in /etc/.  T
    * Used when pulling sources for syncing
    * Set to rawhide if using rawhide branch
    * Example: f26
+ * BREW_WEB_URL
+   * What is URL to Brew Koji Web interface?
+   * Example: https://brewweb.example.com/brew
+ * BREW_DISTGIT_URL
+   * What is URL to packages dis-git?
+   * Example: http://packages.example.com/cgit
  * BREW_BRANCH
    * What branch in brew dist-git to sync into
    * Examples: rhel-7.4
