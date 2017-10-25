@@ -22,10 +22,12 @@ REMOTE="TRUE"
 BREW_CHECK="TRUE"
 LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
 LOCK_FILE="${WORKDIR}/logs/lockfile-$(date +%Y-%m-%d)"
-OVERALL_TXT="${WORKDIR}/results/overall-status.txt"
-OVERALL_HTML="${WORKDIR}/results/overall-status.html"
-BUILDING_HTML="${WORKDIR}/results/building-status.html"
-FAILURE_HTML="${WORKDIR}/results/failure-status.html"
+WEB_DIR="${WORKDIR}/results/"
+OVERALL_TXT="${WEB_DIR}/overall-status.txt"
+OVERALL_HTML="${WEB_DIR}/overall-status.html"
+BUILDING_HTML="${WEB_DIR}/overall-building-status.html"
+FAILURE_HTML="${WEB_DIR}/overall-failure-status.html"
+MODULE_LIST="Hardware Host Installer Perl Platform AppsFull AppsUnique Bootstrap BootSelf"
 JOB_TRACKER="${WORKDIR}/job-tracker-$$"
 PARALLEL_JOBS=4
 DEP_LIST="brew git fedpkg koji rhpkg flock"
@@ -157,7 +159,7 @@ function get_packages {
   elif [ "${TEXT_FILE}" != "" ] ; then
     for line in $(cat "${TEXT_FILE}")
     do
-      fed_nvr="$(echo ${line} | sed "s/-[0-9]*:/-/" | sed 's/.src//')"
+      fed_nvr="$(echo ${line} | sed "s/-[0-9]*:/-/" | sed 's/.src$//')"
       fed_hash="$(fedpkg gitbuildhash ${fed_nvr} 2>/dev/null)"
       this_name="$(koji rpminfo ${fed_nvr}.src | grep 'SRPM Path:' | awk -F'/' '{print $5}')"
       echo "${this_name} ${fed_hash} ${fed_nvr}"
@@ -441,7 +443,7 @@ check_build_status() {
   job_number="${1}"
   build_log="${2}"
   this_stat_line="$(head -n1 ${build_log})"
-  this_name="$(echo ${build_log} | sed 's|.build||')"
+  this_name="$(echo ${build_log} | sed 's|.build$||')"
   task_number="$(grep Created ${build_log} | awk '{print $3}')"
   echo "  [${this_name}] Check Start"
   if [ "${task_number}" == "" ] ; then
@@ -492,6 +494,7 @@ create_status_page() {
   overall_success="$(grep SUCCESS ${OVERALL_TXT} |wc -l)"
   overall_failure="$(grep -e FAILURE -e ERROR ${OVERALL_TXT} |wc -l)"
 
+  echo "    Starting Overall web page"
   for this_type in Overall Building Failure
   do
     if [ "${this_type}" == "Overall" ] ; then
@@ -510,11 +513,18 @@ create_status_page() {
     echo "<p>Page updated: " >> ${this_html}
     date --utc >> ${this_html}
     echo "</p>" >> ${this_html}
+    echo "<h2>Module Pages</h2>" >> ${this_html}
+    echo "<p>" >> ${this_html}
+    for this_mod_name in overall-status ${MODULE_LIST}
+    do
+      echo " .. <a href=\"${this_mod_name}.html\">${this_mod_name} </a> .. " >> ${this_html}
+    done
+    echo "</p>" >> ${this_html}
     echo "<h2>Totals</h2>" >> ${this_html}
     echo "<p>" >> ${this_html}
-    echo "<a href=\"building-status.html\">Building:</a> <strong>${overall_building}</strong><br>" >> ${this_html}
+    echo "<a href=\"overall-building-status.html\">Building:</a> <strong>${overall_building}</strong><br>" >> ${this_html}
     echo "<a href=\"overall-status.html\">Success:</a> <strong>${overall_success}</strong><br>" >> ${this_html}
-    echo "<a href=\"failure-status.html\">Failure:</a> <strong>${overall_failure}</strong><br>" >> ${this_html}
+    echo "<a href=\"overall-failure-status.html\">Failure:</a> <strong>${overall_failure}</strong><br>" >> ${this_html}
     echo "Total: <strong>${overall_total}</strong><br>" >> ${this_html}
     echo "</p>" >> ${this_html}
     echo "<h2>Details</h2>" >> ${this_html}
@@ -552,6 +562,62 @@ create_status_page() {
     elif [ "${this_status}" == "FAILURE" ] ; then
       echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${FAILURE_HTML}
     fi
+  done
+
+  for mod_name in ${MODULE_LIST}
+  do
+    echo "    Starting ${mod_name} web page"
+    rm -f ${WEB_DIR}/${mod_name}.html
+    echo "<html>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<head><title>RHEL Build Progress ${mod_name}</title></head>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<body>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<h1>RHEL ${mod_name} Build Progress: ${BREW_DIST}</h1>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<p>Page updated: " >> ${WEB_DIR}/${mod_name}.html
+    date --utc >> ${WEB_DIR}/${mod_name}.html
+    echo "</p>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<h2>Module Pages</h2>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<p>" >> ${WEB_DIR}/${mod_name}.html
+    for this_mod_name in overall-status ${MODULE_LIST}
+    do
+      echo " .. <a href=\"${this_mod_name}.html\">${this_mod_name} </a> .. " >> ${WEB_DIR}/${mod_name}.html
+    done
+    echo "</p>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<h2>Totals</h2>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<p>" >> ${WEB_DIR}/${mod_name}.html
+    echo "Building: <strong>::BUILD-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
+    echo "Success: <strong>::SUCC-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
+    echo "Failure: <strong>::FAIL-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
+    echo "Unknown: <strong>::UNKNOWN-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
+    echo "Total: <strong>::TOTAL-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
+    echo "</p>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<h2>Details</h2>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<table border=1 style="width:100%">" >> ${WEB_DIR}/${mod_name}.html
+    echo "<tr><th>Name</th><th>STATUS</th><th>NVR</th><th>Build URL</th></tr>" >> ${WEB_DIR}/${mod_name}.html
+
+    cat  ${WEB_DIR}/${mod_name}.txt | while read line
+    do
+      package_line="$(grep ">${line}<" ${OVERALL_HTML})"
+      if [ "${package_line}" == "" ]; then
+        package_line="<tr><td>${line}</td><td>NO INFO</td><td>No Info</td><td>No Info</td></tr>"
+      fi
+      echo "${package_line}" >> ${WEB_DIR}/${mod_name}.html
+    done
+
+    echo "</table>" >> ${WEB_DIR}/${mod_name}.html
+    echo "</body>" >> ${WEB_DIR}/${mod_name}.html
+    echo "</html>" >> ${WEB_DIR}/${mod_name}.html
+
+    mod_total="$(cat ${WEB_DIR}/${mod_name}.txt |wc -l)"
+    mod_building="$(grep BUILDING ${WEB_DIR}/${mod_name}.html |wc -l)"
+    mod_success="$(grep SUCCESS ${WEB_DIR}/${mod_name}.html |wc -l)"
+    mod_failure="$(grep -e FAILURE -e ERROR ${WEB_DIR}/${mod_name}.html |wc -l)"
+    mod_unknown="$(grep "NO INFO" ${WEB_DIR}/${mod_name}.html |wc -l)"
+    sed -i "s/::TOTAL-PLACEHOLDER::/${mod_total}/" ${WEB_DIR}/${mod_name}.html
+    sed -i "s/::BUILD-PLACEHOLDER::/${mod_building}/" ${WEB_DIR}/${mod_name}.html
+    sed -i "s/::SUCC-PLACEHOLDER::/${mod_success}/" ${WEB_DIR}/${mod_name}.html
+    sed -i "s/::FAIL-PLACEHOLDER::/${mod_failure}/" ${WEB_DIR}/${mod_name}.html
+    sed -i "s/::UNKNOWN-PLACEHOLDER::/${mod_unknown}/" ${WEB_DIR}/${mod_name}.html
+
   done
 
   for this_html in ${OVERALL_HTML} ${BUILDING_HTML} ${FAILURE_HTML}
