@@ -1,0 +1,527 @@
+#!/bin/bash
+###############
+# GET USER SETABLE VARIABLES
+###############
+SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+if [ -f ${SCRIPT_HOME}/koji-rebuild.conf ] ; then
+  source ${SCRIPT_HOME}/koji-rebuild.conf
+elif [ -f /etc/koji-rebuild.conf ] ; then
+  source /etc/koji-rebuild.conf
+else
+  echo "Unable to find koji-rebuild.conf"
+  echo "Expecting it to be ${SCRIPT_HOME}/koji-rebuild.conf or /etc/koji-rebuild.conf"
+  echo "Exiting ..."
+  exit 42
+fi
+
+###############
+# SETUP and CHECK
+###############
+mkdir -vp ${WORKDIR}/{${KOJI_BINARY},logs,results,tmp}
+touch ${LOCK_FILE}
+for this_dep in ${DEP_LIST}
+do
+  test_path="$(which ${this_dep} 2>/dev/null)"
+  if [ "${test_path}" == "" ] ; then
+    echo "${this_dep} was not found in your path."
+    echo "${DEP_LIST} needs to be installed, and in your path."
+    echo "exiting..."
+    exit 1
+  fi
+done
+
+###############
+# Show help
+###############
+usage() {
+  echo "Usage `basename $0` [command] <options> <[package 1] ... [package n]>" >&2
+  echo >&2
+  echo "Multipurpose tool to help build and track packages on koji." >&2
+  echo "  Can work on different koji builder systems such as brew or cbs" >&2
+  echo >&2
+  echo "Commands: (there must be one command, only one)" >&2
+  echo "  --check" >&2
+  echo "    Check the status of builds" >&2
+  echo "  --build --rebuild" >&2
+  echo "    (re)Build package(s) in ${KOJI_BINARY}, if they have not already been built." >&2
+  echo "    Mandatory: --yaml OR --text OR [package]" >&2
+  echo >&2
+  echo "Options:" >&2
+  echo "  --text [file]" >&2
+  echo "    Text file to use for list of packages" >&2
+  echo "      Each package is on its own line in format <n-v-r>.src" >&2
+  echo "      Example:acl-2.2.52-15.fc27.src" >&2
+  echo "  --jobs [Integer]" >&2
+  echo "    Number of jobs to do in parallel" >&2
+  echo "  --no-remote --noremote" >&2
+  echo "    Do not sync map ore results remotely.  Default: ${REMOTE} " >&2
+  echo "  -v --verbose --debug" >&2
+  echo "    Be verbose, for debugging" >&2
+  echo "  -h, --help" >&2
+  echo "    Show this options menu" >&2
+  echo >&2
+  echo "Other:" >&2
+  echo "  [package]" >&2
+  echo "    If you want to do just a single file, list just the name" >&2
+  echo "    Not applied if either --yaml or --text are used." >&2
+  echo >&2
+  popd &>/dev/null
+  exit 1
+}
+
+###############
+# Parse a yaml file
+###############
+function parse_yaml {
+   local prefix=$2
+   local s='[[:space:]]*' w='[a-zA-Z0-9_-+.]*' fs=$(echo @|tr @ '\034')
+   sed -ne "s|^\($s\):|\1|" \
+        -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
+        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p"  $1 |
+   awk -F$fs '{
+      indent = length($1)/2;
+      vname[indent] = $2;
+      for (i in vname) {if (i > indent) {delete vname[i]}}
+      if (length($3) > 0) {
+         vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
+         printf("%s%s%s=\"%s\"\n", "'$prefix'",vn, $2, $3);
+      }
+   }'
+}
+
+###############
+# Return the list of packages
+###############
+function get_packages {
+  if [ "${TEXT_FILE}" != "" ] ; then
+    for line in $(cat "${TEXT_FILE}")
+    do
+      this_name="${line}"
+      echo "${this_name}"
+    done
+  elif [ "${PACKAGE_LIST}" != "" ] ; then
+    for this_name in ${PACKAGE_LIST}
+    do
+      echo "${this_name}"
+    done
+  else
+    echo ; echo "ERROR: No packages or files given to process" ; echo
+    usage
+    exit 5
+  fi
+}
+
+###############
+# Update overall status in results directory
+###############
+update_overall_status() {
+  SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+  if [ -f ${SCRIPT_HOME}/koji-rebuild.conf ] ; then
+    source ${SCRIPT_HOME}/koji-rebuild.conf
+  elif [ -f /etc/koji-rebuild.conf ] ; then
+    source /etc/koji-rebuild.conf
+  else
+    echo "Unable to find koji-rebuild.conf"
+    echo "Expecting it to be ${SCRIPT_HOME}/koji-rebuild.conf or /etc/koji-rebuild.conf"
+    echo "Exiting ..."
+    exit 42
+  fi
+  update_name="${1}"
+  update_status="${2}"
+  update_task_number="${3}"
+  update_nvr="${4}"
+  if [ "${VERBOSE}" == "TRUE" ] ; then
+      echo "    update_name: ${update_name}"
+      echo "    update_nvr: ${update_nvr}"
+      echo "    update_task_number: ${update_task_number}"
+      echo "    update_status: ${update_status}"
+  fi
+  if grep -q "^${update_name} " ${OVERALL_TXT} ; then
+    flock ${LOCK_FILE} sed -i "s|^${update_name} .*|${update_name} ${update_status} ${update_nvr} ${KOJI_WEB_URL}/taskinfo?taskID=${update_task_number}|" ${OVERALL_TXT}
+  else
+    flock ${LOCK_FILE} echo "${update_name} ${update_status} ${update_nvr} ${KOJI_WEB_URL}/taskinfo?taskID=${update_task_number}" >> ${OVERALL_TXT}
+  fi
+}
+
+###############
+# rsync directory out to remote server
+###############
+rsync_out() {
+  this_dir="${1}"
+  if [ "${VERBOSE}" == "TRUE" ] ; then
+    echo "    this_dir: ${this_dir}"
+    echo "    SYNC_REMOTE: ${SYNC_REMOTE}"
+  fi
+  if [ "${this_dir}" != "" ] && [ -d ${WORKDIR}/${this_dir} ] ; then
+    rsync -avH --exclude=.git/ --delete ${WORKDIR}/${this_dir}/ ${SYNC_REMOTE}/${this_dir}/
+  else
+    echo "  ERROR: We cannot rsync ${WORKDIR}/${this_dir} remotely"
+  fi
+}
+
+###############
+# rsync directory in from remote server
+###############
+rsync_in() {
+  this_dir="${1}"
+  if [ "${VERBOSE}" == "TRUE" ] ; then
+    echo "    this_dir: ${this_dir}"
+    echo "    SYNC_REMOTE: ${SYNC_REMOTE}"
+  fi
+  if [ "${this_dir}" != "" ] ; then
+    rsync -avH --exclude=.git/ --delete ${SYNC_REMOTE}/${this_dir}/ ${WORKDIR}/${this_dir}/
+  else
+    echo "  ERROR: No directory was passed to rsync into"
+  fi
+}
+
+###############
+# Build packages
+###############
+build_package() {
+  this_name="${1}"
+  SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+  if [ -f ${SCRIPT_HOME}/koji-rebuild.conf ] ; then
+    source ${SCRIPT_HOME}/koji-rebuild.conf
+  elif [ -f /etc/koji-rebuild.conf ] ; then
+    source /etc/koji-rebuild.conf
+  else
+    echo "Unable to find koji-rebuild.conf"
+    echo "Expecting it to be ${SCRIPT_HOME}/koji-rebuild.conf or /etc/koji-rebuild.conf"
+    echo "Exiting ..."
+    exit 42
+  fi
+  echo "  [${this_name}] Build Setup Start"
+  if [ "${VERBOSE}" == "TRUE" ] ; then
+    echo "    Name: ${this_name}"
+  fi
+  # Everything should be setup by now, lets start the build
+  if [ -f ${WORKDIR}/logs/${this_name}.build ] ; then
+    echo "    [${this_name}] Already Building"
+  else
+      echo "    [${this_name}] Build Needed - Setting up"
+      if [ -d ${WORKDIR}/${KOJI_BINARY}/${this_name} ] ; then
+        cd ${WORKDIR}/${KOJI_BINARY}/${this_name}
+        ${KOJI_PKG_BINARY} switch-branch ${DISTGIT_BRANCH} >/dev/null 2>&1
+        if ! [ $? -eq 0 ] ; then
+          echo "    [${this_name}] Unable to checkout ${this_name} ${DISTGIT_BRANCH}"
+          echo "      [${this_name}] Not proceeding further with ${this_name} build."
+          exit 2
+        fi
+        ${KOJI_PKG_BINARY} pull >/dev/null 2>&1
+      else
+        cd ${WORKDIR}/${KOJI_BINARY}
+        ${KOJI_PKG_BINARY} clone ${this_name} >/dev/null 2>&1
+        if ! [ $? -eq 0 ] ; then
+          echo "    [${this_name}] Unable to clone ${this_name}"
+          echo "      [${this_name}] You might not have permissions, or"
+          echo "      [${this_name}] ${this_name} might not be a package."
+          exit 2
+        fi
+        cd ${WORKDIR}/${KOJI_BINARY}/${this_name}
+        ${KOJI_PKG_BINARY} switch-branch ${DISTGIT_BRANCH} >/dev/null 2>&1
+        if ! [ $? -eq 0 ] ; then
+          echo "    [${this_name}] Unable to checkout ${this_name} ${DISTGIT_BRANCH}"
+          echo "      [${this_name}] Not proceeding further with ${this_name} build."
+          exit 2
+        fi
+      fi
+      ${KOJI_PKG_BINARY} pull >/dev/null 2>&1
+      echo "${this_name}" >> ${WORKDIR}/logs/${this_name}.build
+      if [ "${USE_DIFFERENT_TARGETS}" == "true" ] || [ "${USE_DIFFERENT_TARGETS}" == "TRUE" ] ; then
+        targeted_packages=${!dict_pkg_target[@]}
+        if [[ "${targeted_packages}" =~ (^|[[:space:]])"${this_name}"($|[[:space:]]) ]] ; then
+          KOJI_TARGET=${dict_pkg_target[${this_name}]}
+        fi
+        echo "      [${this_name}] KOJI_TARGET:${KOJI_TARGET}"
+      fi
+      if [ "${SCRATCH_BUILD}" == "true" ] || [ "${SCRATCH_BUILD}" == "TRUE" ] ; then
+        ${KOJI_PKG_BINARY} build --skip-nvr-check --nowait --scratch --target ${KOJI_TARGET} ${SCRATCH_ARCH} >> ${WORKDIR}/logs/${this_name}.build 2>&1
+      else
+        ${KOJI_PKG_BINARY} build --skip-nvr-check --nowait --target ${KOJI_TARGET} >> ${WORKDIR}/logs/${this_name}.build 2>&1
+      fi
+  fi
+  echo "  [${this_name}] Build Setup End"
+}
+
+###############
+# Check build status
+###############
+check_build_status() {
+  build_log="${1}"
+  SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+  if [ -f ${SCRIPT_HOME}/koji-rebuild.conf ] ; then
+    source ${SCRIPT_HOME}/koji-rebuild.conf
+  elif [ -f /etc/koji-rebuild.conf ] ; then
+    source /etc/koji-rebuild.conf
+  else
+    echo "Unable to find koji-rebuild.conf"
+    echo "Expecting it to be ${SCRIPT_HOME}/koji-rebuild.conf or /etc/koji-rebuild.conf"
+    echo "Exiting ..."
+    exit 42
+  fi
+  cd ${WORKDIR}/logs
+  this_stat_line="$(head -n1 ${build_log})"
+  this_name="$(echo ${build_log} | sed 's|.build$||')"
+  task_number="$(grep ^Created ${build_log} | head -n1 | awk '{print $3}')"
+  this_nvr="$(grep ^Building ${build_log} | head -n1 | awk '{print $2}')"
+  echo "  [${this_name}] Check Start"
+  if [ "${task_number}" == "" ] ; then
+    echo "    [${this_name}] ERROR: No task_number found"
+    this_nvr="ERROR"
+    task_number="ERROR"
+    this_status="ERROR"
+    cd ${SCRIPT_HOME}
+    update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
+    cd ${WORKDIR}/logs
+  else
+    this_taskinfo="$(${KOJI_BINARY} taskinfo ${task_number})"
+    this_state="$(echo "${this_taskinfo}" | grep State: | awk '{print $2}')"
+    echo "    [${this_name}] Current State: ${this_state}"
+    if [ "${this_state}" == "closed" ] || [ "${this_state}" == "failed" ] || [ "${this_state}" == "canceled" ] ; then
+      mkdir -vp ${WORKDIR}/results/${this_name}/${task_number} > /dev/null
+      if [ "${this_state}" == "closed" ] ; then
+        this_status="SUCCESS"
+        if [ "${DOWNLOAD_LOGS}" == "true" ] || [ "${DOWNLOAD_LOGS}" == "TRUE" ] ; then
+          echo "      [${this_name}] Downloading build logs."
+          ${KOJI_BINARY} download-logs -r -d ${WORKDIR}/results/${this_name}/${task_number} ${task_number} > /dev/null 2>&1
+        fi
+      fi
+      if [ "${this_state}" == "failed" ] ; then
+        this_status="FAILURE"
+        if [ "${DOWNLOAD_LOGS}" == "true" ] || [ "${DOWNLOAD_LOGS}" == "TRUE" ] ; then
+          echo "      [${this_name}] Downloading build logs."
+          ${KOJI_BINARY} download-logs -r -d ${WORKDIR}/results/${this_name}/${task_number} ${task_number} > /dev/null 2>&1
+        fi
+      fi
+      if [ "${this_state}" == "canceled" ] ; then
+        this_status="FAILURE"
+      fi
+      cd ${SCRIPT_HOME}
+      update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
+      cd ${WORKDIR}/logs
+      echo "${this_status}: ${this_nvr} ${KOJI_WEB_URL}/taskinfo?taskID=${task_number}" >> ${WORKDIR}/results/${this_name}/status.txt
+      mv ${WORKDIR}/logs/${build_log} ${WORKDIR}/results/${this_name}/${task_number}/${build_log}.txt
+      # rm -rf ${WORKDIR}/${KOJI_BINARY}/${this_name}
+    else
+      this_status="BUILDING"
+      cd ${SCRIPT_HOME}
+      update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
+      cd ${WORKDIR}/logs
+    fi
+  fi
+  echo "  [${this_name}] Check End"
+}
+
+###############
+# Create Status Web Page
+###############
+create_status_page() {
+  sort -o ${OVERALL_TXT} ${OVERALL_TXT}
+  overall_total="$(cat ${OVERALL_TXT} |wc -l)"
+  overall_building="$(grep BUILDING ${OVERALL_TXT} |wc -l)"
+  overall_success="$(grep SUCCESS ${OVERALL_TXT} |wc -l)"
+  overall_failure="$(grep -e FAILURE -e ERROR ${OVERALL_TXT} |wc -l)"
+
+  for this_type in Overall Building Failure
+  do
+    if [ "${this_type}" == "Overall" ] ; then
+      this_html="${OVERALL_HTML}"
+    elif [ "${this_type}" == "Building" ] ; then
+      this_html="${BUILDING_HTML}"
+    else
+      this_html="${FAILURE_HTML}"
+    fi
+
+    rm -f ${this_html}
+    echo "<html>" >> ${this_html}
+    echo "<head><title>${DISTRIBUTION} Rebuild Progress ${this_type}</title></head>" >> ${this_html}
+    echo "<body>" >> ${this_html}
+    echo "<h1>${DISTRIBUTION} ${this_type} Rebuild Progress: ${KOJI_TARGET}</h1>" >> ${this_html}
+    echo "<p>Page updated: " >> ${this_html}
+    date --utc >> ${this_html}
+    echo "</p>" >> ${this_html}
+    echo "<h2>Totals</h2>" >> ${this_html}
+    echo "<p>" >> ${this_html}
+    echo "<a href=\"overall-building-status.html\">Building:</a> <strong>${overall_building}</strong><br>" >> ${this_html}
+    echo "<a href=\"overall-status.html\">Success:</a> <strong>${overall_success}</strong><br>" >> ${this_html}
+    echo "<a href=\"overall-failure-status.html\">Failure:</a> <strong>${overall_failure}</strong><br>" >> ${this_html}
+    echo "Total: <strong>${overall_total}</strong><br>" >> ${this_html}
+    echo "</p>" >> ${this_html}
+    echo "<h2>Details</h2>" >> ${this_html}
+    echo "<table border=1 style="width:100%">" >> ${this_html}
+    echo "<tr><th>Name</th><th>STATUS</th><th>NVR</th><th>Build URL</th></tr>" >> ${this_html}
+  done
+
+  cat ${OVERALL_TXT} | while read line
+  do
+    this_name="$(echo ${line} | awk '{print $1}')"
+    this_status="$(echo ${line} | awk '{print $2}')"
+    this_nvr="$(echo ${line} | awk '{print $3}')"
+    task_url="$(echo ${line} | awk '{print $4}')"
+    if [ "${task_url}" == "" ] ; then
+      task_url="${this_nvr}"
+      this_nvr="Still in build setup"
+    fi
+    task_number="$(echo ${task_url} | awk -F'=' '{print $2}')"
+    if [ "${VERBOSE}" == "TRUE" ] ; then
+      echo "    this_name: ${this_name}"
+      echo "    this_nvr: ${this_nvr}"
+      echo "    this_status: ${this_status}"
+      echo "    task_number: ${task_number}"
+      echo "    task_url: ${task_url}"
+    fi
+    this_color="#FF0000"
+    if [ "${this_status}" == "SUCCESS" ] ; then
+          this_color="#00FF00"
+    elif [ "${this_status}" == "BUILDING" ] ; then
+          this_color="#00FFFF"
+    fi
+    echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${OVERALL_HTML}
+    if [ "${this_status}" == "BUILDING" ] ; then
+      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${BUILDING_HTML}
+    elif [ "${this_status}" == "FAILURE" ] ; then
+      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${FAILURE_HTML}
+    fi
+  done
+
+  for this_html in ${OVERALL_HTML} ${BUILDING_HTML} ${FAILURE_HTML}
+  do
+    echo "</table>" >> ${this_html}
+    echo "</body>" >> ${this_html}
+    echo "</html>" >> ${this_html}
+  done
+}
+
+###############
+# Get our arguments
+###############
+while [[ "$#" -ge 1 ]]
+do
+key="$1"
+case $key in
+    --check )
+      export COMMAND="CHECK"
+    ;;
+    --build | --rebuild )
+      export COMMAND="BUILD"
+    ;;
+    --yaml )
+      export YAML_FILE="${2}"
+      shift
+    ;;
+    --jobs )
+      export PARALLEL_JOBS="${2}"
+      shift
+    ;;
+    --text )
+      export TEXT_FILE="${2}"
+      shift
+    ;;
+    --no-remote | --noremote)
+      export REMOTE="FALSE"
+    ;;
+    -v | --verbose | --debug)
+      export VERBOSE="TRUE"
+    ;;
+    -h | --help )
+      usage
+      exit 1
+    ;;
+    *)
+      PACKAGE_LIST="${PACKAGE_LIST} ${key}"
+    ;;
+esac
+shift # past argument or value
+done
+
+if [ "${SYNC_REMOTE}" == "" ] ; then
+  export REMOTE="FALSE"
+fi
+
+if [ "${VERBOSE}" == "TRUE" ] ; then
+  echo "COMMAND: ${COMMAND}"
+  echo "WORKDIR: ${WORKDIR}"
+  echo "OVERALL_TXT: ${OVERALL_TXT}"
+  echo "OVERALL_HTML: ${OVERALL_HTML}"
+  echo "DISTGIT_BRANCH: ${DISTGIT_BRANCH}"
+  echo "KOJI_TARGET: ${KOJI_TARGET}"
+  echo "PACKAGE_LIST: ${PACKAGE_LIST}"
+  echo "LOGFILE: ${LOGFILE}"
+  echo "YAML_FILE: ${YAML_FILE}"
+  echo "TEXT_FILE: ${TEXT_FILE}"
+  echo "REMOTE: ${REMOTE}"
+  echo "SYNC_REMOTE: ${SYNC_REMOTE}"
+  echo "PARALLEL_JOBS: ${PARALLEL_JOBS}"
+fi
+
+case "${COMMAND}" in
+  CHECK )
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "Syncing results from remote area"
+      rsync_in results
+      echo "Syncing logs from remote area"
+      rsync_in logs
+    fi
+    cd ${SCRIPT_HOME}
+    export -f check_build_status
+    export -f build_package
+    export -f update_overall_status
+    echo "  START STATUS CHECK"
+    cd ${WORKDIR}/logs
+    build_list="$(ls -1 *.build 2>/dev/null)"
+    if [ "${build_list}" == "" ] ; then
+      echo "    No builds to process"
+    else
+      cd ${SCRIPT_HOME}
+      echo "${build_list}" | xargs --max-procs=${PARALLEL_JOBS} -I THIS_PACKAGE \
+        bash -c "check_build_status THIS_PACKAGE"
+    fi
+    echo "  END STATUS CHECK"
+    echo "  START STATUS WEB PAGE CREATION"
+    create_status_page
+    echo "  END STATUS WEB PAGE CREATION"
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "Syncing results from remote area"
+      rsync_out results
+      echo "Syncing logs from remote area"
+      rsync_out logs
+    fi
+  ;;
+  BUILD )
+    if [ "${YAML_FILE}" == "" ] && [ "${TEXT_FILE}" == "" ] && [ "${PACKAGE_LIST}" == "" ]; then
+      echo ; echo "ERROR: No packages or files given to process" ; echo
+      usage
+      exit 5
+    fi
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "Syncing logs from remote area"
+      rsync_in logs
+    fi
+    package_list="$(get_packages)"
+    cd ${SCRIPT_HOME}
+    export -f check_build_status
+    export -f build_package
+    export -f contains
+    cd ${SCRIPT_HOME}
+    echo "Gathering package information"
+    echo "${package_list}"  | xargs --max-procs=${PARALLEL_JOBS} -I THIS_PACKAGE \
+      bash -c "build_package THIS_PACKAGE"
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "Syncing mapping to remote area"
+      rsync_out logs
+    fi
+  ;;
+  * )
+    echo ; echo "ERROR: A command must be given" ; echo
+    usage
+    exit 4
+  ;;
+esac
+
+###############
+# CLEANUP
+###############
+
+echo "Finished"
+exit 0
