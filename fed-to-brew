@@ -14,28 +14,7 @@ else
   exit 42
 fi
 
-###############
-# OTHER SCRIPT VARIABLES
-###############
-VERBOSE="FALSE"
-REMOTE="TRUE"
-BREW_CHECK="TRUE"
-LOGFILE="${WORKDIR}/logs/output-$(date +%Y-%m-%d)"
-LOCK_FILE="${WORKDIR}/logs/lockfile-$(date +%Y-%m-%d)"
-WEB_DIR="${WORKDIR}/results/"
-OVERALL_TXT="${WEB_DIR}/overall-status.txt"
-OVERALL_HTML="${WEB_DIR}/overall-status.html"
-BUILDING_HTML="${WEB_DIR}/overall-building-status.html"
-FAILURE_HTML="${WEB_DIR}/overall-failure-status.html"
-MODULE_LIST="BootSelf Bootstrap Hardware Host Installer Perl Platform"
-JOB_TRACKER="${WORKDIR}/job-tracker-$$"
-PARALLEL_JOBS=4
-DEP_LIST="brew git fedpkg koji rhpkg flock"
-COMMAND=""
-PACKAGE_LIST=""
-CUSTOM_MESSAGE=""
-YAML_FILE=""
-TEXT_FILE=""
+
 
 ###############
 # SETUP and CHECK
@@ -70,6 +49,10 @@ usage() {
   echo "    Mandatory: --yaml OR --txt OR [package]" >&2
   echo "  --check" >&2
   echo "    Check the status of builds" >&2
+  echo "  --double-check --dc --doublecheck" >&2
+  echo "    Double check failed builds" >&2
+  echo "  --check-modules --checkmodules" >&2
+  echo "    Check the modules" >&2
   echo "  --build --rebuild" >&2
   echo "    Build package(s) in brew, if they have not already been built." >&2
   echo "    Will sync packages Fedora dist-git to Brew dist-git if needed." >&2
@@ -161,6 +144,9 @@ function get_packages {
     do
       fed_nvr="$(echo ${line} | sed "s/-[0-9]*:/-/" | sed 's/.src$//')"
       fed_hash="$(fedpkg gitbuildhash ${fed_nvr} 2>/dev/null)"
+      if [ "${fed_hash}" == "" ] ; then
+        fed_hash="$(fedpkg gitbuildhash ${fed_nvr} 2>&1 | awk -F'?#' '{print $2}')"
+      fi
       this_name="$(koji rpminfo ${fed_nvr}.src | grep 'SRPM Path:' | awk -F'/' '{print $5}')"
       echo "${this_name} ${fed_hash} ${fed_nvr}"
     done
@@ -188,20 +174,32 @@ function get_packages {
 ###############
 update_overall_status() {
   update_name="${1}"
-  update_status="${2}"
-  update_task_number="${3}"
-  update_nvr="${4}"
+  update_nvr="${2}"
+  update_status="${3}"
+  update_task_number="${4}"
+  update_fed_nvr="${5}"
+  update_fed_status="${6}"
+  SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+  if [ -f ${SCRIPT_HOME}/fed-to-brew.conf ] ; then
+    source ${SCRIPT_HOME}/fed-to-brew.conf
+  elif [ -f /etc/fed-to-brew.conf ] ; then
+    source /etc/fed-to-brew.conf
+  else
+    echo "Unable to find fed-to-brew.conf"
+    echo "Expecting it to be ${SCRIPT_HOME}/fed-to-brew.conf or /etc/fed-to-brew.conf"
+    echo "Exiting ..."
+    exit 42
+  fi
+
   if [ "${VERBOSE}" == "TRUE" ] ; then
-      echo "    update_name: ${update_name}"
-      echo "    update_nvr: ${update_nvr}"
-      echo "    update_task_number: ${update_task_number}"
-      echo "    update_status: ${update_status}"
-    fi
-    if grep -q "^${update_name} " ${OVERALL_TXT} ; then
-      flock ${LOCK_FILE} sed -i "s|^${update_name} .*|${update_name} ${update_status} ${update_nvr} ${BREW_WEB_URL}/taskinfo?taskID=${update_task_number}|" ${OVERALL_TXT}
-    else
-      flock ${LOCK_FILE} echo "${update_name} ${update_status} ${update_nvr} ${BREW_WEB_URL}/taskinfo?taskID=${update_task_number}" >> ${OVERALL_TXT}
-    fi
+    echo "    update_name: ${update_name}"
+    echo "    update_nvr: ${update_nvr}"
+    echo "    update_status: ${update_status}"
+    echo "    update_task_number: ${update_task_number}"
+    echo "    update_fed_nvr: ${update_fed_nvr}"
+    echo "    update_fed_status: ${update_fed_status}"
+  fi
+  flock ${LOCK_FILE} echo "${update_name} ${update_nvr} ${update_status} ${update_task_number} ${update_fed_nvr} ${update_fed_status}" >> ${OVERALL_TXT}
 }
 
 ###############
@@ -394,6 +392,7 @@ build_package() {
     if [ -f ${WORKDIR}/logs/${this_name}.build ] ; then
       echo "    [${this_name}] Already Building"
     else
+
       if grep "fednvr:${this_nvr} fedhash:${fed_hash}" ${WORKDIR}/results/${this_name}/status.txt 2>/dev/null | grep -q SUCCESS:  ; then
         echo "    [${this_name}] Already Successfully Built"
       else
@@ -428,12 +427,291 @@ build_package() {
           fi
         fi
         echo "${this_name} fednvr:${this_nvr} fedhash:${fed_hash} " >> ${WORKDIR}/logs/${this_name}.build
-        rhpkg build --skip-nvr-check --nowait >> ${WORKDIR}/logs/${this_name}.build 2>&1
+        if [ "${USE_DIFFERENT_TARGETS}" == "true" ] || [ "${USE_DIFFERENT_TARGETS}" == "TRUE" ] ; then
+          targeted_packages=${!dict_pkg_target[@]}
+          if [[ "${targeted_packages}" =~ (^|[[:space:]])"${this_name}"($|[[:space:]]) ]] ; then
+            KOJI_TARGET=${dict_pkg_target[${this_name}]}
+          fi
+          echo "      [${this_name}] KOJI_TARGET:${KOJI_TARGET}"
+        fi
+        rhpkg build --skip-nvr-check --nowait --target ${KOJI_TARGET} >> ${WORKDIR}/logs/${this_name}.build 2>&1
       fi
     fi
     echo "  [${this_name}] Build Setup End"
   fi
   end_job ${job_number}
+}
+
+###############
+# Module Status
+###############
+check_module_status() {
+  mkdir -p ${WORKDIR}/{results,tmp}/modules
+  # Check those currently being worked on
+  echo "    Checking modules still building ..."
+  mbs-build -s https://mbs.engineering.redhat.com/ -p rhpkg overview 2>&1 | while read line
+  do
+    this_task_id="$(echo $line |awk '{print $1}')"
+    if [ "${this_task_id}" != "ID" ] && [ "${this_task_id}" != "----" ] ; then
+      this_module_name="$(echo $line | awk '{print $6}' | sed 's/-rhel-8.0-.*//' )"
+      if ! grep -q "^${this_module_name}$" ${MODULES_DIR}/module.blacklist.txt ; then
+        if ! [ -d ${WORKDIR}/tmp/modules/${this_module_name} ] ; then
+          this_status="$(echo $line |awk '{print $2}')"
+          mkdir -p ${WORKDIR}/tmp/modules/${this_module_name}
+          echo "${line}" >> ${WORKDIR}/tmp/modules/${this_module_name}/status.txt
+          echo "-------" >> ${WORKDIR}/tmp/modules/${this_module_name}/status.txt
+          mbs-build -q -s https://mbs.engineering.redhat.com/ -p rhpkg info ${this_task_id} 2>/dev/null | sed "s|https://koji.fedoraproject.org/koji|https://brewweb.engineering.redhat.com/brew|g"  >> ${WORKDIR}/tmp/modules/${this_module_name}/status.txt
+          this_total="$(grep -e BUILDING -e FAILED -e COMPLETE ${WORKDIR}/tmp/modules/${this_module_name}/status.txt | wc -l)"
+          this_complete="$(grep -e COMPLETE ${WORKDIR}/tmp/modules/${this_module_name}/status.txt | wc -l)"
+          this_failed="$(grep -e FAILED ${WORKDIR}/tmp/modules/${this_module_name}/status.txt | wc -l)"
+          this_building="$(grep -e BUILDING ${WORKDIR}/tmp/modules/${this_module_name}/status.txt | wc -l)"
+          echo "${this_module_name} ${this_status} ${this_task_id} ${this_building}/${this_failed}/${this_complete}/${this_total}" >> ${WORKDIR}/tmp/modules/module-status.txt
+        fi
+      fi
+    fi
+  done
+
+  # Check older module builds
+  echo "    Checking modules already built ..."
+  mbs-build -s https://mbs.engineering.redhat.com/ -p rhpkg overview --finished --limit 0 2>&1 | while read line
+  do
+    this_task_id="$(echo $line |awk '{print $1}')"
+    if [ "${this_task_id}" != "ID" ] && [ "${this_task_id}" != "----" ] ; then
+      this_module_name="$(echo $line | awk '{print $6}' | sed 's/-rhel-8.0-.*//' )"
+      # echo "      Name: ${this_module_name} ${this_task_id}"
+      if ! grep -q "^${this_module_name}$" ${MODULES_DIR}/module.blacklist.txt ; then
+        # echo "        No Blacklist: ${this_module_name} ${this_task_id}"
+        if ! [ -d ${WORKDIR}/tmp/modules/${this_module_name} ] ; then
+          # echo "          Working On: ${this_module_name} ${this_task_id}"
+          this_status="$(echo $line |awk '{print $2}')"
+          mkdir -p ${WORKDIR}/tmp/modules/${this_module_name}
+          echo "${line}" >> ${WORKDIR}/tmp/modules/${this_module_name}/status.txt
+          echo "-------" >> ${WORKDIR}/tmp/modules/${this_module_name}/status.txt
+          mbs-build -q -s https://mbs.engineering.redhat.com/ -p rhpkg info ${this_task_id} 2>/dev/null | sed "s|https://koji.fedoraproject.org/koji|https://brewweb.engineering.redhat.com/brew|g"  >> ${WORKDIR}/tmp/modules/${this_module_name}/status.txt
+          this_total="$(grep -e BUILDING -e FAILED -e COMPLETE ${WORKDIR}/tmp/modules/${this_module_name}/status.txt | wc -l)"
+          this_complete="$(grep -e COMPLETE ${WORKDIR}/tmp/modules/${this_module_name}/status.txt | wc -l)"
+          this_failed="$(grep -e FAILED ${WORKDIR}/tmp/modules/${this_module_name}/status.txt | wc -l)"
+          this_building="$(grep -e BUILDING ${WORKDIR}/tmp/modules/${this_module_name}/status.txt | wc -l)"
+          echo "${this_module_name} ${this_status} ${this_task_id} ${this_building}/${this_failed}/${this_complete}/${this_total}" >> ${WORKDIR}/tmp/modules/module-status.txt
+        fi
+      fi
+    fi
+  done
+
+  # Create Package List
+  echo "    Creating Package List from Modules ..."
+  cp -rp ${MODULES_DIR}/module.blacklist.txt ${MODULES_DIR}/task_cache.txt ${WORKDIR}/tmp/modules/
+  TEMP_PKG_LIST="${WORKDIR}/tmp/modules/modules.package-list.txt"
+  touch ${TEMP_PKG_LIST}
+  ls -1 ${WORKDIR}/tmp/modules/ | while read this_mod_name
+  do
+    if [ -s ${WORKDIR}/tmp/modules/${this_mod_name}/status.txt ] ; then
+      grep https ${WORKDIR}/tmp/modules/${this_mod_name}/status.txt | grep -v module-build-macros | cut -d'=' -f2 | while read this_task_num
+      do
+        this_pkg_name="$(grep "^${this_task_num} " ${WORKDIR}/tmp/modules/task_cache.txt | awk '{print $2}')"
+        if [ "${this_pkg_name}" == "" ] ; then
+          this_pkg_name="$(brew taskinfo -v ${this_task_num} | grep Source: | cut -d'/' -f5 | cut -d'?' -f1)"
+          echo "${this_task_num} ${this_pkg_name}" >> ${WORKDIR}/tmp/modules/task_cache.txt
+        fi
+        # echo "      ${this_pkg_name} ${this_mod_name}"
+        echo "${this_pkg_name} ${this_mod_name}" >> ${WORKDIR}/tmp/modules/pkg-list-${this_mod_name}
+      done
+      sort -u -o ${WORKDIR}/tmp/modules/pkg-list-${this_mod_name} ${WORKDIR}/tmp/modules/pkg-list-${this_mod_name}
+      join -a 1 -a 2 --nocheck-order ${TEMP_PKG_LIST} ${WORKDIR}/tmp/modules/pkg-list-${this_mod_name} >> ${TEMP_PKG_LIST}.tmp 2>/dev/null
+      sort -o ${TEMP_PKG_LIST} ${TEMP_PKG_LIST}.tmp
+      rm -f ${TEMP_PKG_LIST}.tmp
+      rm -f ${WORKDIR}/tmp/modules/pkg-list-${this_mod_name}
+    fi
+  done
+  # cat ${TEMP_PKG_LIST}
+
+  # Finish and cleanup
+  sort -u -o ${WORKDIR}/tmp/modules/module-status.txt ${WORKDIR}/tmp/modules/module-status.txt
+  rsync -a --delete ${WORKDIR}/tmp/modules/ ${MODULES_DIR}/
+  rm -rf ${WORKDIR}/tmp/modules/*
+
+}
+###############
+# Update Bootstrap Info
+###############
+update_bootstrap_info() {
+  echo "    Starting Package Lists Updating"
+  tmp_boot_dir="${WORKDIR}/tmp/baseruntime-package-lists"
+  if ! [ -d ${tmp_boot_dir} ] ; then
+    cd ${WORKDIR}/tmp/
+    git clone https://github.com/fedora-modularity/baseruntime-package-lists.git
+  fi
+  cd ${tmp_boot_dir}
+  git checkout master
+  git pull
+  cd ${tmp_boot_dir}/data/Fedora/devel/bootstrap
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-source-packages-full.txt | sort -u -o ${WEB_DIR}/BootSelf-Full.txt
+  cat  ${WEB_DIR}/BootSelf-Full.txt | sed "s/-[0-9]*:/-/" | sed 's|.fc2[0-9]|.dist|' >> ${WEB_DIR}/BootSelf-Full-Dist.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/BootSelf.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/BootSelf-Binary.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/Bootstrap.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/Bootstrap-Binary.txt
+  cd ${tmp_boot_dir}/data/Fedora/devel/hp
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/HostPlatform.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/HostPlatform-Binary.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/HostPlatformSelf.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/HostPlatformSelf-Binary.txt
+  cd ${tmp_boot_dir}/data/Fedora/devel/atomic
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/Atomic.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/Atomic-Binary.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/AtomicSelf.txt
+  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/AtomicSelf-Binary.txt
+  # Now create toplevel and dependency lists
+  cat ${WEB_DIR}/modules/modules.package-list.txt | awk '{print $1}' | sort -u -o ${WEB_DIR}/Modules.txt
+  cat ${WEB_DIR}/Modules.txt ${WEB_DIR}/Bootstrap.txt ${WEB_DIR}/HostPlatform.txt ${WEB_DIR}/Atomic.txt | sort -u -o ${WEB_DIR}/Runtime.txt
+  cat ${WEB_DIR}/Modules.txt ${WEB_DIR}/Bootstrap-Binary.txt ${WEB_DIR}/HostPlatform-Binary.txt ${WEB_DIR}/Atomic-Binary.txt | sort -u -o ${WEB_DIR}/Runtime-Binary.txt
+  cat ${WEB_DIR}/Modules.txt ${WEB_DIR}/BootSelf.txt ${WEB_DIR}/HostPlatformSelf.txt ${WEB_DIR}/AtomicSelf.txt | sort -u -o ${WEB_DIR}/SelfHosting.txt
+  cat ${WEB_DIR}/Modules.txt ${WEB_DIR}/BootSelf-Binary.txt ${WEB_DIR}/HostPlatformSelf-Binary.txt ${WEB_DIR}/AtomicSelf-Binary.txt | sort -u -o ${WEB_DIR}/SelfHosting-Binary.txt
+  comm -13 ${WEB_DIR}/Runtime.txt ${WEB_DIR}/SelfHosting.txt | sort -u -o ${WEB_DIR}/Dependencies.txt
+  comm -13 ${WEB_DIR}/Runtime-Binary.txt ${WEB_DIR}/SelfHosting-Binary.txt | sort -u -o ${WEB_DIR}/Dependencies-Binary.txt
+  cat  ${WEB_DIR}/SelfHosting.txt ${WEB_DIR}/BlackList.txt ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/EverythingKnown.txt
+  brew -q list-pkgs --tag=rhel-8.0-candidate | awk '{print $1}' | sort -u -o ${WEB_DIR}/RHEL8PkgList.txt
+  comm -23 ${WEB_DIR}/RHEL8PkgList.txt ${WEB_DIR}/EverythingKnown.txt | sort -u -o ${WEB_DIR}/Unknown.txt
+  echo "    Ending Package Lists Updating"
+}
+
+###############
+# Double Check Package status
+###############
+double_check_build_status() {
+  #job_number="${1}"
+  this_name="${1}"
+  SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+  if [ -f ${SCRIPT_HOME}/fed-to-brew.conf ] ; then
+    source ${SCRIPT_HOME}/fed-to-brew.conf
+  elif [ -f /etc/fed-to-brew.conf ] ; then
+    source /etc/fed-to-brew.conf
+  else
+    echo "Unable to find fed-to-brew.conf"
+    echo "Expecting it to be ${SCRIPT_HOME}/fed-to-brew.conf or /etc/fed-to-brew.conf"
+    echo "Exiting ..."
+    exit 42
+  fi
+
+  echo "  [${this_name}] Double Check Start"
+  mkdir -p ${WEB_DIR}/${this_name}
+  brew list-tagged --latest  --rpms rhel-8.0-candidate ${this_name} | grep -v -e debuginfo -e debugsource  | sort -u -o ${WEB_DIR}/${this_name}/test-nvra.txt
+  if [ -s ${WEB_DIR}/${this_name}/test-nvra.txt ] ; then
+    if diff -q ${WEB_DIR}/${this_name}/latest-nvra.txt ${WEB_DIR}/${this_name}/test-nvra.txt > /dev/null ; then
+      # There was no changes, no need to do anything.
+      rm -f ${WEB_DIR}/${this_name}/test-nvra.txt
+    else
+      this_nvr="$(grep .src$ ${WEB_DIR}/${this_name}/latest-nvra.txt | sed 's/.src$//')"
+      echo "    [${this_name}] Successful Build: ${this_nvr}"
+      this_status="SUCCESS"
+      task_number="$(brew buildinfo ${this_nvr}| grep ^Task: | awk '{print $2}')"
+      # Find the binary packages
+      this_vr="$(echo ${this_nvr} | sed "s/^${this_name}-//")"
+      grep -v .src$ ${WEB_DIR}/${this_name}/latest-nvra.txt | sed "s/-${this_vr}.*//" | sort -u -o ${WEB_DIR}/${this_name}/binary-packages.txt
+    fi
+    # for check_nvra in $(grep .el8 ${WEB_DIR}/${this_name}/binary-packages.txt)
+    # do
+    #   check_nvr="$(echo ${check_nvra} | sed 's/.aarch64$//' | sed 's/.i686$//' | sed 's/.ppc64le$//' | sed 's/.s390x$//' | sed 's/.x86_64$//' | sed 's/.noarch$//')"
+    #   check_name=""
+    #   if [ -s ${WEB_DIR}/${this_name}/nvr.to.name.txt ] ; then
+    #     check_name="$(grep ^${check_nvr} ${WEB_DIR}/${this_name}/nvr.to.name.txt | awk '{print $2}')"
+    #   fi
+    #   if [ "${check_name}" == "" ] ; then
+    #     check_name="$(dnf --disablerepo=* --enablerepo=rhel-8.0-candidate info ${check_nvr} | grep ^Name | head -n1 | awk '{print $3}')"
+    #     if [ "${check_name}" != "" ] ; then
+    #       echo "${check_nvr} ${check_name}" >> ${WEB_DIR}/${this_name}/nvr.to.name.txt
+    #     fi
+    #   fi
+    #   sed "s/^${check_nvra}$/${check_name}/" ${WEB_DIR}/${this_name}/binary-packages.txt
+    # done
+    # sort -u -o ${WEB_DIR}/${this_name}/binary-packages.txt ${WEB_DIR}/${this_name}/binary-packages.txt
+  else
+    echo "    [${this_name}] No Builds"
+    this_nvr="NONE"
+    this_status="NONE"
+    task_number="NONE"
+    rm -f ${WEB_DIR}/${this_name}/test-nvra.txt
+  fi
+  # Check if mass rebuild was successful
+  if [ "${this_nvr}" == "NONE" ] ; then
+    this_brew_status="WARN"
+    cd ${WORKDIR}/brew/
+    if  ! [ -d ${this_name} ] ; then
+      rhpkg clone ${this_name} >> ${LOGFILE} 2>&1
+    fi
+    cd ${this_name}
+    rhpkg switch-branch rhel-8.0 >> ${LOGFILE} 2>&1
+    rhpkg pull >> ${LOGFILE} 2>&1
+    if [ -s .rhel8-metadata ] ; then
+      cp .rhel8-metadata ${WEB_DIR}/${this_name}/rhel8-metadata.txt
+    fi
+    this_brew_nvr="$(rhpkg verrel 2>/dev/null | sed "s/.el8/${BREW_DIST}/")"
+    if [ "${this_brew_nvr}" == "" ] ; then
+      this_brew_nvr="NONE"
+    fi
+  else
+    this_nvr_dist="$(echo ${this_nvr} | sed 's/.el8+[0-9]/.checkdist/' | sed 's/.el8_[0-9]/.checkdist/' | sed 's/.el8/.checkdist/')"
+    this_check_nvr="$(echo ${this_nvr_dist} | sed "s/.checkdist/${BREW_DIST}/")"
+    if [ "${this_nvr}" == "${this_check_nvr}" ] ; then
+      this_brew_nvr="${this_nvr}"
+      this_brew_status="SUCCESS"
+    else
+      this_brew_status="WARN"
+      cd ${WORKDIR}/brew/
+      if  ! [ -d ${this_name} ] ; then
+        rhpkg clone ${this_name} >> ${LOGFILE} 2>&1
+      fi
+      cd ${this_name}
+      rhpkg switch-branch rhel-8.0 >> ${LOGFILE} 2>&1
+      rhpkg pull >> ${LOGFILE} 2>&1
+      if [ -s .rhel8-metadata ] ; then
+        cp .rhel8-metadata ${WEB_DIR}/${this_name}/rhel8-metadata.txt
+      fi
+      this_brew_nvr="$(rhpkg verrel 2>/dev/null | sed "s/.el8/${BREW_DIST}/")"
+    fi
+  fi
+  # # Find out and check brew nvr
+  # cd ${WORKDIR}/brew/
+  # if  ! [ -d ${this_name} ] ; then
+  #   rhpkg clone ${this_name} >> ${LOGFILE} 2>&1
+  # fi
+  # cd ${this_name}
+  # rhpkg switch-branch rhel-8.0 >> ${LOGFILE} 2>&1
+  # rhpkg pull >> ${LOGFILE} 2>&1
+  # if [ -s .rhel8-metadata ] ; then
+  #   cp .rhel8-metadata ${WEB_DIR}/${this_name}/rhel8-metadata.txt
+  # fi
+  # this_brew_nvr="$(rhpkg verrel 2>/dev/null)"
+  # if [ "${this_brew_nvr}" == "" ] ; then
+  #   this_brew_nvr="NONE"
+  #   this_brew_status="WARN"
+  #   echo "    [${this_name}] Build Does Not Match Dist-Git: ${this_nvr} != ${this_brew_nvr}"
+  # else
+  #   this_brew_nvr_dist="$(echo ${this_brew_nvr} | sed 's/.el8+[0-9]/.dist/' | sed 's/.el8_[0-9]/.dist/' | sed 's/.el8/.dist/')"
+  #   if [ "${this_nvr_dist}" == "${this_brew_nvr_dist}" ] ; then
+  #     echo "    [${this_name}] Build Matches Dist-Git: ${this_brew_nvr}"
+  #     this_brew_status="SUCCESS"
+  #   else
+  #     echo "    [${this_name}] Build Does Not Match Dist-Git: ${this_nvr} != ${this_brew_nvr}"
+  #     this_brew_status="WARN"
+  #   fi
+  # fi
+    # if [ "${this_fed_nvr}" == "" ] ; then
+    #   this_fed_name="$(grep ^${this_name} ${WEB_DIR}/BootSelf.txt | head -n1)"
+    #   if [ "${this_fed_name}" == "" ] ; then
+    #     this_fed_nvr="NONE"
+    #     this_fed_status="NONE"
+    #   else
+    #     this_fed_nvr="$(grep ^${this_fed_name} ${WEB_DIR}/BootSelf-Full.txt | head -n1)"
+    #     this_fed_status="WARN"
+    #   fi
+    # else
+    #   this_fed_status="SUCCESS"
+    # fi
+  cd ${SCRIPT_HOME}
+  update_overall_status ${this_name} ${this_nvr} ${this_status} ${task_number} ${this_brew_nvr} ${this_brew_status}
+  echo "  [${this_name}] Double Check End"
+  #end_job ${job_number}
 }
 
 ###############
@@ -451,11 +729,27 @@ check_build_status() {
     this_nvr="ERROR"
     task_number="ERROR"
     this_status="ERROR"
-    update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
+    this_fed_nvr="NONE"
+    this_fed_status="NONE"
+    # update_overall_status ${this_name} ${this_nvr} ${this_status} ${task_number} ${this_fed_nvr} ${this_fed_status}
   else
     this_taskinfo="$(brew taskinfo ${task_number})"
     this_state="$(echo "${this_taskinfo}" | grep State: | awk '{print $2}')"
     this_nvr="$(echo "${this_taskinfo}" | grep Build: | awk '{print $2}')"
+    this_nvr_dist="$(echo ${this_nvr} | sed 's/.el8+[0-9]/.dist/' | sed 's/.el8_[0-9]/.dist/' | sed 's/.el8/.dist/')"
+    this_fed_nvr="$(grep ^${this_nvr_dist} ${WEB_DIR}/BootSelf-Full-Dist.txt)"
+    if [ "${this_fed_nvr}" == "" ] ; then
+      this_fed_name="$(grep ^${this_name} ${WEB_DIR}/BootSelf.txt | head -n1)"
+      if [ "${this_fed_name}" == "" ] ; then
+        this_fed_nvr="NONE"
+        this_fed_status="NONE"
+      else
+        this_fed_nvr="$(grep ^${this_fed_name} ${WEB_DIR}/BootSelf-Full.txt | head -n1)"
+        this_fed_status="WARN"
+      fi
+    else
+      this_fed_status="SUCCESS"
+    fi
     echo "    [${this_name}] Current State: ${this_state}"
     if [ "${this_state}" == "closed" ] || [ "${this_state}" == "failed" ] || [ "${this_state}" == "canceled" ] ; then
       mkdir -vp ${WORKDIR}/results/${this_name}/${task_number} > /dev/null
@@ -464,24 +758,93 @@ check_build_status() {
       fi
       if [ "${this_state}" == "failed" ] ; then
         this_status="FAILURE"
-        echo "      [${this_name}] Downloading failed build logs."
-        brew download-logs -r -d ${WORKDIR}/results/${this_name}/${task_number} ${task_number} > /dev/null 2>&1
+        if [ "${DOWNLOAD_LOGS}" == "true" ] || [ "${DOWNLOAD_LOGS}" == "TRUE" ] ; then
+          echo "      [${this_name}] Downloading failed build logs."
+          brew download-logs -r -d ${WORKDIR}/results/${this_name}/${task_number} ${task_number} > /dev/null 2>&1
+        fi
       fi
       if [ "${this_state}" == "canceled" ] ; then
         this_status="FAILURE"
       fi
-      update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
+      # update_overall_status ${this_name} ${this_nvr} ${this_status} ${task_number} ${this_fed_nvr} ${this_fed_status}
       this_fed_info="$(echo ${this_stat_line} | awk '{print $2 " " $3}')"
       echo "${this_status}: ${this_nvr} ${BREW_WEB_URL}/taskinfo?taskID=${task_number} ${this_fed_info}" >> ${WORKDIR}/results/${this_name}/status.txt
       mv ${WORKDIR}/logs/${build_log} ${WORKDIR}/results/${this_name}/${task_number}/${build_log}.txt
-      rm -rf ${WORKDIR}/brew/${this_name}
+      # rm -rf ${WORKDIR}/brew/${this_name}
     else
       this_status="BUILDING"
-      update_overall_status ${this_name} ${this_status} ${task_number} ${this_nvr}
+      # update_overall_status ${this_name} ${this_nvr} ${this_status} ${task_number} ${this_fed_nvr} ${this_fed_status}
     fi
   fi
   echo "  [${this_name}] Check End"
   end_job ${job_number}
+}
+
+###############
+# Create Modules Status Web Page
+###############
+create_modules_status_page() {
+  sort -o ${MODULES_TXT} ${MODULES_TXT}
+  overall_total="$(cat ${MODULES_TXT} |wc -l)"
+  overall_building="$(grep ' build ' ${MODULES_TXT} |wc -l)"
+  overall_success="$(grep ' ready ' ${MODULES_TXT} |wc -l)"
+  overall_failure="$(grep ' failed ' ${MODULES_TXT} |wc -l)"
+
+  echo "    Starting Modules Overall web page"
+  this_html="${MODULES_HTML}"
+  rm -f ${this_html}
+  echo "<html>" >> ${this_html}
+  echo "<head><title>Module Build Progress ${this_type}</title></head>" >> ${this_html}
+  echo "<body>" >> ${this_html}
+  echo "<h1>Module Build Progress: ${BREW_DIST}</h1>" >> ${this_html}
+  echo "<p>Page updated: " >> ${this_html}
+  date --utc >> ${this_html}
+  echo "</p>" >> ${this_html}
+  echo "<h2>General Pages</h2>" >> ${this_html}
+  echo "<p>" >> ${this_html}
+  echo "<a href=\"../overall-status.html\">Non-Module Overall Builds </a>" >> ${this_html}
+  echo "<br><a href=\"modules.package-list.txt\">List of Packages in Modules </a> .. " >> ${this_html}
+  echo "<a href=\"module.blacklist.txt\">Module BlackList </a>" >> ${this_html}
+  echo "</p>" >> ${this_html}
+  echo "<h2>Totals</h2>" >> ${this_html}
+  echo "<p>" >> ${this_html}
+  echo "Building: <strong>${overall_building}</strong><br>" >> ${this_html}
+  echo "Success: <strong>${overall_success}</strong><br>" >> ${this_html}
+  echo "Failure: <strong>${overall_failure}</strong><br>" >> ${this_html}
+  echo "Total: <strong>${overall_total}</strong><br>" >> ${this_html}
+  echo "</p>" >> ${this_html}
+  echo "<h2>Details</h2>" >> ${this_html}
+  echo "<table border=1 style="width:100%">" >> ${this_html}
+  echo "<tr><th>Name</th><th>STATUS</th><th>ID</th><th>Progress: B/F/C/T</th></tr>" >> ${this_html}
+
+  cat ${MODULES_TXT} | while read line
+  do
+    this_name="$(echo ${line} | awk '{print $1}')"
+    this_status="$(echo ${line} | awk '{print $2}')"
+    this_id="$(echo ${line} | awk '{print $3}')"
+    this_progress="$(echo ${line} | awk '{print $4}')"
+    if [ "${VERBOSE}" == "TRUE" ] ; then
+      echo "    this_name: ${this_name}"
+      echo "    this_status: ${this_status}"
+      echo "    this_id: ${this_id}"
+      echo "    this_progress: ${this_progress}"
+    fi
+    this_color="#FF0000"
+    if [ "${this_status}" == "ready" ] ; then
+      this_color="#00FF00"
+      this_view_status="SUCCESS"
+    elif [ "${this_status}" == "build" ] ; then
+      this_color="#00FFFF"
+      this_view_status="BUILDING"
+    else
+      this_view_status="FAILURE"
+    fi
+    echo "<tr><td><a href=\"${this_name}/status.txt\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_view_status}</td><td>${this_id}</td><td>${this_progress}</td></tr>" >> ${this_html}
+  done
+
+  echo "</table>" >> ${this_html}
+  echo "</body>" >> ${this_html}
+  echo "</html>" >> ${this_html}
 }
 
 ###############
@@ -490,16 +853,16 @@ check_build_status() {
 create_status_page() {
   sort -o ${OVERALL_TXT} ${OVERALL_TXT}
   overall_total="$(cat ${OVERALL_TXT} |wc -l)"
-  overall_building="$(grep BUILDING ${OVERALL_TXT} |wc -l)"
   overall_success="$(grep SUCCESS ${OVERALL_TXT} |wc -l)"
-  overall_failure="$(grep -e FAILURE -e ERROR ${OVERALL_TXT} |wc -l)"
+  overall_warn="$(grep WARN ${OVERALL_TXT} | grep -v -e FAILURE -e ERROR -e NONE |wc -l)"
+  overall_none="$(grep -e FAILURE -e ERROR -e NONE ${OVERALL_TXT} |wc -l)"
 
   echo "    Starting Overall web page"
-  for this_type in Overall Building Failure
+  for this_type in Overall Warn None
   do
     if [ "${this_type}" == "Overall" ] ; then
       this_html="${OVERALL_HTML}"
-    elif [ "${this_type}" == "Building" ] ; then
+    elif [ "${this_type}" == "Warn" ] ; then
       this_html="${BUILDING_HTML}"
     else
       this_html="${FAILURE_HTML}"
@@ -512,6 +875,7 @@ create_status_page() {
     echo "<h1>RHEL ${this_type} Build Progress: ${BREW_DIST}</h1>" >> ${this_html}
     echo "<p>Page updated: " >> ${this_html}
     date --utc >> ${this_html}
+    echo "<br><a href=\"overall-status-$(date --date=yesterday +%Y-%m-%d).html\">Yesterdays Overall Status $(date --date=yesterday +%Y-%m-%d)</a>" >> ${this_html}
     echo "</p>" >> ${this_html}
     echo "<h2>Module Pages</h2>" >> ${this_html}
     echo "<p>" >> ${this_html}
@@ -519,28 +883,32 @@ create_status_page() {
     do
       echo " .. <a href=\"${this_mod_name}.html\">${this_mod_name} </a> .. " >> ${this_html}
     done
+    echo "<br><a href=\"${MODULES_HTML_LOCAL}\">Module Builds </a>" >> ${this_html}
     echo "</p>" >> ${this_html}
     echo "<h2>Totals</h2>" >> ${this_html}
     echo "<p>" >> ${this_html}
-    echo "<a href=\"overall-building-status.html\">Building:</a> <strong>${overall_building}</strong><br>" >> ${this_html}
     echo "<a href=\"overall-status.html\">Success:</a> <strong>${overall_success}</strong><br>" >> ${this_html}
-    echo "<a href=\"overall-failure-status.html\">Failure:</a> <strong>${overall_failure}</strong><br>" >> ${this_html}
+    echo "<a href=\"overall-building-status.html\">Warn:</a> <strong>${overall_warn}</strong><br>" >> ${this_html}
+    echo "<a href=\"overall-failure-status.html\">NoBuilds:</a> <strong>${overall_none}</strong><br>" >> ${this_html}
     echo "Total: <strong>${overall_total}</strong><br>" >> ${this_html}
     echo "</p>" >> ${this_html}
     echo "<h2>Details</h2>" >> ${this_html}
     echo "<table border=1 style="width:100%">" >> ${this_html}
-    echo "<tr><th>Name</th><th>STATUS</th><th>NVR</th><th>Build URL</th></tr>" >> ${this_html}
+    echo "<tr><th>Name</th><th>Brew Built NVR</th><th>Brew dist-git NVR</th><th>Build URL</th></tr>" >> ${this_html}
   done
 
   cat ${OVERALL_TXT} | while read line
   do
     this_name="$(echo ${line} | awk '{print $1}')"
-    this_status="$(echo ${line} | awk '{print $2}')"
-    this_nvr="$(echo ${line} | awk '{print $3}')"
-    task_url="$(echo ${line} | awk '{print $4}')"
-    if [ "${task_url}" == "" ] ; then
-      task_url="${this_nvr}"
-      this_nvr="Still in build setup"
+    this_nvr="$(echo ${line} | awk '{print $2}')"
+    this_status="$(echo ${line} | awk '{print $3}')"
+    this_task="$(echo ${line} | awk '{print $4}')"
+    this_fed_nvr="$(echo ${line} | awk '{print $5}')"
+    this_fed_status="$(echo ${line} | awk '{print $6}')"
+    if [ "${this_task}" == "NONE" ] ; then
+      task_url=" "
+    else
+      task_url="<a href=\"${BREW_WEB_URL}/taskinfo?taskID=${this_task}\">${this_task}</a>"
     fi
     task_number="$(echo ${task_url} | awk -F'=' '{print $2}')"
     if [ "${VERBOSE}" == "TRUE" ] ; then
@@ -550,17 +918,21 @@ create_status_page() {
       echo "    task_number: ${task_number}"
       echo "    task_url: ${task_url}"
     fi
-    this_color="#FF0000"
+    this_color="#CCCCFF"
     if [ "${this_status}" == "SUCCESS" ] ; then
-          this_color="#00FF00"
-    elif [ "${this_status}" == "BUILDING" ] ; then
-          this_color="#00FFFF"
+      this_color="#00FF00"
     fi
-    echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${OVERALL_HTML}
-    if [ "${this_status}" == "BUILDING" ] ; then
-      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${BUILDING_HTML}
-    elif [ "${this_status}" == "FAILURE" ] ; then
-      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_status}</td><td>${this_nvr}</td><td><a href=\"${task_url}\">${task_number}</a></td></tr>" >> ${FAILURE_HTML}
+    this_fed_color="#FFFFFF"
+    if [ "${this_fed_status}" == "SUCCESS" ] ; then
+      this_fed_color="#00FF00"
+    elif [ "${this_fed_status}" == "WARN" ] ; then
+      this_fed_color="#FFFFCC"
+    fi
+    echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${OVERALL_HTML}
+    if [ "${this_status}" == "SUCCESS" ] && [ "${this_fed_status}" == "WARN" ] ; then
+      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${BUILDING_HTML}
+    elif [ "${this_status}" == "NONE" ] ; then
+      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${FAILURE_HTML}
     fi
   done
 
@@ -584,15 +956,14 @@ create_status_page() {
     echo "</p>" >> ${WEB_DIR}/${mod_name}.html
     echo "<h2>Totals</h2>" >> ${WEB_DIR}/${mod_name}.html
     echo "<p>" >> ${WEB_DIR}/${mod_name}.html
-    echo "Building: <strong>::BUILD-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
     echo "Success: <strong>::SUCC-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
-    echo "Failure: <strong>::FAIL-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
-    echo "Unknown: <strong>::UNKNOWN-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
+    echo "Warn: <strong>::BUILD-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
+    echo "NoBuilds: <strong>::UNKNOWN-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
     echo "Total: <strong>::TOTAL-PLACEHOLDER::</strong><br>" >> ${WEB_DIR}/${mod_name}.html
     echo "</p>" >> ${WEB_DIR}/${mod_name}.html
     echo "<h2>Details</h2>" >> ${WEB_DIR}/${mod_name}.html
     echo "<table border=1 style="width:100%">" >> ${WEB_DIR}/${mod_name}.html
-    echo "<tr><th>Name</th><th>STATUS</th><th>NVR</th><th>Build URL</th></tr>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<tr><th>Name</th><th>Brew Built NVR</th><th>Brew dist-git NVR</th><th>Build URL</th></tr>" >> ${WEB_DIR}/${mod_name}.html
 
     cat  ${WEB_DIR}/${mod_name}.txt | while read line
     do
@@ -608,14 +979,12 @@ create_status_page() {
     echo "</html>" >> ${WEB_DIR}/${mod_name}.html
 
     mod_total="$(cat ${WEB_DIR}/${mod_name}.txt |wc -l)"
-    mod_building="$(grep BUILDING ${WEB_DIR}/${mod_name}.html |wc -l)"
-    mod_success="$(grep SUCCESS ${WEB_DIR}/${mod_name}.html |wc -l)"
-    mod_failure="$(grep -e FAILURE -e ERROR ${WEB_DIR}/${mod_name}.html |wc -l)"
-    mod_unknown="$(grep "NO INFO" ${WEB_DIR}/${mod_name}.html |wc -l)"
+    mod_warn="$(grep '#FFFFCC' ${WEB_DIR}/${mod_name}.html | grep -v '#CCCCFF' |wc -l)"
+    mod_success="$(grep '#00FF00' ${WEB_DIR}/${mod_name}.html |wc -l)"
+    mod_unknown="$(grep '#CCCCFF' ${WEB_DIR}/${mod_name}.html |wc -l)"
     sed -i "s/::TOTAL-PLACEHOLDER::/${mod_total}/" ${WEB_DIR}/${mod_name}.html
-    sed -i "s/::BUILD-PLACEHOLDER::/${mod_building}/" ${WEB_DIR}/${mod_name}.html
+    sed -i "s/::BUILD-PLACEHOLDER::/${mod_warn}/" ${WEB_DIR}/${mod_name}.html
     sed -i "s/::SUCC-PLACEHOLDER::/${mod_success}/" ${WEB_DIR}/${mod_name}.html
-    sed -i "s/::FAIL-PLACEHOLDER::/${mod_failure}/" ${WEB_DIR}/${mod_name}.html
     sed -i "s/::UNKNOWN-PLACEHOLDER::/${mod_unknown}/" ${WEB_DIR}/${mod_name}.html
 
   done
@@ -686,6 +1055,12 @@ case $key in
     ;;
     --build | --rebuild )
       export COMMAND="BUILD"
+    ;;
+    --double-check | --dc | --doublecheck )
+      export COMMAND="DOUBLE_CHECK"
+    ;;
+    --check-modules | --checkmodules )
+      export COMMAND="CHECK_MODULES"
     ;;
     -c | --checkout )
       export FED_GIT_CHECKOUT="${2}"
@@ -825,8 +1200,68 @@ case "${COMMAND}" in
     fi
     wait_for_jobs
     echo "  END STATUS CHECK"
+    # echo "  START STATUS WEB PAGE CREATION"
+    # create_status_page
+    # echo "  END STATUS WEB PAGE CREATION"
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "  RSYNC TO  REMOTE"
+      rsync_out results
+    fi
+  ;;
+  DOUBLE_CHECK )
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "  RSYNC FROM  REMOTE"
+      rsync_in results
+    fi
+    echo "  START STATUS DOUBLE CHECK"
+    # Save off our over pages once a day
+    if ! [ -f ${OLD_OVERALL_TXT} ] ; then
+      cp ${OVERALL_TXT} ${OLD_OVERALL_TXT}
+      cp ${OVERALL_HTML} ${OLD_OVERALL_HTML}
+    fi
+    update_bootstrap_info
+    # A Fresh file each time
+    rm -f ${OVERALL_TXT}
+    cd ${SCRIPT_HOME}
+    export -f double_check_build_status
+    export -f update_overall_status
+    cd ${SCRIPT_HOME}
+    brew -q list-pkgs --tag=rhel-8.0 | awk '{print $1}' | sort -u | grep -v -e ^devtoolset-7 -e ^libguestfs$ -e ^rhel-guest-image$ -e ^rhpkg-simple$ -e ^kernel-rt$ -e vdo | xargs --max-procs=${PARALLEL_JOBS} -I THIS_PACKAGE \
+      bash -c "double_check_build_status THIS_PACKAGE"
+
+    # package_list="$(brew -q list-pkgs --tag=rhel-8.0-candidate | awk '{print $1}' | sort -u)"
+    # if [ "${package_list}" == "" ] ; then
+    #   echo "    No packages to process"
+    # else
+    #   for this_package in ${package_list}
+    #   do
+    #     this_job=$(start_job)
+    #     if [ "${VERBOSE}" == "TRUE" ] ; then
+    #       echo "JOB STARTING: ${this_job} LOG: ${build_log}"
+    #     fi
+    #     double_check_build_status  ${this_job} ${this_package} &
+    #   done
+    # fi
+    # wait_for_jobs
+    echo "  END STATUS DOUBLE CHECK"
     echo "  START STATUS WEB PAGE CREATION"
     create_status_page
+    echo "  END STATUS WEB PAGE CREATION"
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "  RSYNC TO  REMOTE"
+      rsync_out results
+    fi
+  ;;
+  CHECK_MODULES )
+    if [ "${REMOTE}" == "TRUE" ] ; then
+      echo "  RSYNC FROM  REMOTE"
+      rsync_in results
+    fi
+    echo "  START MODULES CHECK"
+    check_module_status
+    echo "  END MODULES CHECK"
+    echo "  START STATUS WEB PAGE CREATION"
+    create_modules_status_page
     echo "  END STATUS WEB PAGE CREATION"
     if [ "${REMOTE}" == "TRUE" ] ; then
       echo "  RSYNC TO  REMOTE"
