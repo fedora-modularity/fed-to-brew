@@ -44,19 +44,22 @@ fed-to-brew.conf has to be in the same directory as fed-to-brew, or in /etc/.  T
 
 ## Usage
 
-Usage fed-to-brew [command] <options> <[package 1] ... [package n]>                                                                                                                    
-                                                                                                                                                                                       
-Multipurpose tool to help tracking, syncing, building packages between                                                                                                                 
-  fedora and brew.                                                                                                                                                                     
-                                                                                                                                                                                       
-**Commands:** (there must be one command, only one)                                                                                                                                        
+Usage fed-to-brew [command] <options> <[package 1] ... [package n]>
+
+Multipurpose tool to help tracking, syncing, building packages between
+  fedora and brew.
+
+**Commands:** (there must be one command, only one)
  * --sync
    * Sync package(s) from Fedora dist-git to Brew dist-git.
    * Only syncs from one git commit, does not do entire history.
-   * Mandatory: --brew-branch
    * Mandatory: --yaml OR --txt OR [package]
  * --check
    * Check the status of builds
+ * --double-check --dc --doublecheck
+   * Goes through an entire release and double checks all the builds
+ * --check-modules --checkmodules
+   * Check the modules to see if all their packages built.
  * --build --rebuild
    * Build package(s) in brew, if they have not already been built.
    * Will sync packages Fedora dist-git to Brew dist-git if needed.
