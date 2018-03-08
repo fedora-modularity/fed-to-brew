@@ -595,12 +595,17 @@ double_check_build_status() {
 
   echo "  [${this_name}] Double Check Start"
   mkdir -p ${WEB_DIR}/${this_name}
-  brew list-tagged --latest  --rpms rhel-8.0-candidate ${this_name} | grep -v -e debuginfo -e debugsource  | sort -u -o ${WEB_DIR}/${this_name}/test-nvra.txt
-  if [ -s ${WEB_DIR}/${this_name}/test-nvra.txt ] ; then
-    if diff -q ${WEB_DIR}/${this_name}/latest-nvra.txt ${WEB_DIR}/${this_name}/test-nvra.txt > /dev/null ; then
+  brew list-tagged --latest  --rpms rhel-8.0-candidate ${this_name} | grep -v -e debuginfo -e debugsource  | sort -u -o ${WORKDIR}/tmp/${this_name}-test-nvra.txt
+  if [ -s ${WORKDIR}/tmp/${this_name}-test-nvra.txt ] ; then
+    if diff -q ${WEB_DIR}/${this_name}/latest-nvra.txt ${WORKDIR}/tmp/${this_name}-test-nvra.txt > /dev/null ; then
       # There was no changes, no need to do anything.
-      rm -f ${WEB_DIR}/${this_name}/test-nvra.txt
+      rm -f ${WORKDIR}/tmp/${this_name}-test-nvra.txt
+      this_nvr="$(grep .src$ ${WEB_DIR}/${this_name}/latest-nvra.txt | sed 's/.src$//')"
+      echo "    [${this_name}] Successful Build: ${this_nvr}"
+      this_status="SUCCESS"
+      task_number="$(brew buildinfo ${this_nvr}| grep ^Task: | awk '{print $2}')"
     else
+      mv -f ${WORKDIR}/tmp/${this_name}-test-nvra.txt ${WEB_DIR}/${this_name}/latest-nvra.txt
       this_nvr="$(grep .src$ ${WEB_DIR}/${this_name}/latest-nvra.txt | sed 's/.src$//')"
       echo "    [${this_name}] Successful Build: ${this_nvr}"
       this_status="SUCCESS"
@@ -1226,7 +1231,7 @@ case "${COMMAND}" in
     export -f double_check_build_status
     export -f update_overall_status
     cd ${SCRIPT_HOME}
-    brew -q list-pkgs --tag=rhel-8.0 | awk '{print $1}' | sort -u | grep -v -e ^devtoolset-7 -e ^libguestfs$ -e ^rhel-guest-image$ -e ^rhpkg-simple$ -e ^kernel-rt$ -e vdo | xargs --max-procs=${PARALLEL_JOBS} -I THIS_PACKAGE \
+    brew -q list-pkgs --tag=rhel-8.0 | awk '{print $1}' | sort -u | grep -v -e devtoolset -e ^mesa$ | xargs --max-procs=${PARALLEL_JOBS} -I THIS_PACKAGE \
       bash -c "double_check_build_status THIS_PACKAGE"
 
     # package_list="$(brew -q list-pkgs --tag=rhel-8.0-candidate | awk '{print $1}' | sort -u)"
