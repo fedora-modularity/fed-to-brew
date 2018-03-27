@@ -444,13 +444,19 @@ build_package() {
 check_module_status() {
   mkdir -p ${WORKDIR}/{results,tmp}/modules
   # Check those currently being worked on
+  echo "    Generating list of modules ..."
+  wget -q -O ${WORKDIR}/tmp/modules/pungi-modlist.raw 'https://code.engineering.redhat.com/gerrit/gitweb?p=pungi-redhat.git;a=blob_plain;f=variants-appstream.xml;hb=refs/heads/rhel-8.0'
+  grep '<module>' ${WORKDIR}/tmp/modules/pungi-modlist.raw |  cut -d'>' -f2 | cut -d'<' -f1 >> ${WORKDIR}/tmp/modules/pungi-modlist.txt
+  rm -f ${WORKDIR}/tmp/modules/pungi-modlist.raw
+  cp -p ${MODULES_DIR}/upcoming-modules.txt ${WORKDIR}/tmp/modules/upcoming-modules.txt
+  cat ${WORKDIR}/tmp/modules/pungi-modlist.txt ${WORKDIR}/tmp/modules/upcoming-modules.txt | sort -u -o ${WORKDIR}/tmp/modules/all-modules.txt
   echo "    Checking modules still building ..."
   mbs-build -s https://mbs.engineering.redhat.com/ -p rhpkg overview 2>&1 | while read line
   do
     this_task_id="$(echo $line |awk '{print $1}')"
     if [ "${this_task_id}" != "ID" ] && [ "${this_task_id}" != "----" ] ; then
-      this_module_name="$(echo $line | awk '{print $6}' | sed 's/-rhel-8.0-.*//' )"
-      if ! grep -q "^${this_module_name}$" ${MODULES_DIR}/module.blacklist.txt ; then
+      this_module_name="$(echo $line | awk '{print $6}' | cut -d'-' -f1,2 | sed 's|-|:|' )"
+      if grep -q "^${this_module_name}$" ${WORKDIR}/tmp/modules/all-modules.txt ; then
         if ! [ -d ${WORKDIR}/tmp/modules/${this_module_name} ] ; then
           this_status="$(echo $line |awk '{print $2}')"
           mkdir -p ${WORKDIR}/tmp/modules/${this_module_name}
@@ -473,12 +479,9 @@ check_module_status() {
   do
     this_task_id="$(echo $line |awk '{print $1}')"
     if [ "${this_task_id}" != "ID" ] && [ "${this_task_id}" != "----" ] ; then
-      this_module_name="$(echo $line | awk '{print $6}' | sed 's/-rhel-8.0-.*//' )"
-      # echo "      Name: ${this_module_name} ${this_task_id}"
-      if ! grep -q "^${this_module_name}$" ${MODULES_DIR}/module.blacklist.txt ; then
-        # echo "        No Blacklist: ${this_module_name} ${this_task_id}"
+      this_module_name="$(echo $line | awk '{print $6}' | cut -d'-' -f1,2 | sed 's|-|:|' )"
+      if grep -q "^${this_module_name}$" ${WORKDIR}/tmp/modules/all-modules.txt ; then
         if ! [ -d ${WORKDIR}/tmp/modules/${this_module_name} ] ; then
-          # echo "          Working On: ${this_module_name} ${this_task_id}"
           this_status="$(echo $line |awk '{print $2}')"
           mkdir -p ${WORKDIR}/tmp/modules/${this_module_name}
           echo "${line}" >> ${WORKDIR}/tmp/modules/${this_module_name}/status.txt
@@ -496,7 +499,7 @@ check_module_status() {
 
   # Create Package List
   echo "    Creating Package List from Modules ..."
-  cp -rp ${MODULES_DIR}/module.blacklist.txt ${MODULES_DIR}/task_cache.txt ${WORKDIR}/tmp/modules/
+  cp -rp ${MODULES_DIR}/task_cache.txt ${WORKDIR}/tmp/modules/
   TEMP_PKG_LIST="${WORKDIR}/tmp/modules/modules.package-list.txt"
   touch ${TEMP_PKG_LIST}
   ls -1 ${WORKDIR}/tmp/modules/ | while read this_mod_name
@@ -519,7 +522,6 @@ check_module_status() {
       rm -f ${WORKDIR}/tmp/modules/pkg-list-${this_mod_name}
     fi
   done
-  # cat ${TEMP_PKG_LIST}
 
   # Finish and cleanup
   sort -u -o ${WORKDIR}/tmp/modules/module-status.txt ${WORKDIR}/tmp/modules/module-status.txt
@@ -532,42 +534,79 @@ check_module_status() {
 ###############
 update_bootstrap_info() {
   echo "    Starting Package Lists Updating"
-  tmp_boot_dir="${WORKDIR}/tmp/baseruntime-package-lists"
-  if ! [ -d ${tmp_boot_dir} ] ; then
-    cd ${WORKDIR}/tmp/
-    git clone https://github.com/fedora-modularity/baseruntime-package-lists.git
+
+  # Find leaves
+  echo "      Finding Leaves"
+  cd ${WEB_DIR}
+  rm -f ${WORKDIR}/tmp/leaves.txt
+  ls -1 | grep -v -e ^dependencies$ -e ^modules$ -e ^archive$ -e .txt$ -e .html$ | while read line
+  do
+    if ! [ -s $line/whatrequires/overall.sname.txt ] ; then
+      echo $line >> ${WORKDIR}/tmp/leaves.txt
+    fi
+  done
+  sort -u -o ${WORKDIR}/tmp/leaves.txt ${WORKDIR}/tmp/leaves.txt
+  if diff -q ${WORKDIR}/tmp/leaves.txt ${WEB_DIR}/Leaves.txt > /dev/null ; then
+    # No change in Leaves, remove the temp file
+    rm -f ${WORKDIR}/tmp/leaves.txt
+  else
+    # Leaves changed, move new one in
+    mv -v ${WORKDIR}/tmp/leaves.txt ${WEB_DIR}/Leaves.txt
   fi
-  cd ${tmp_boot_dir}
-  git checkout master
-  git pull
-  cd ${tmp_boot_dir}/data/Fedora/devel/bootstrap
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-source-packages-full.txt | sort -u -o ${WEB_DIR}/BootSelf-Full.txt
-  cat  ${WEB_DIR}/BootSelf-Full.txt | sed "s/-[0-9]*:/-/" | sed 's|.fc2[0-9]|.dist|' >> ${WEB_DIR}/BootSelf-Full-Dist.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/BootSelf.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/BootSelf-Binary.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/Bootstrap.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/Bootstrap-Binary.txt
-  cd ${tmp_boot_dir}/data/Fedora/devel/hp
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/HostPlatform.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/HostPlatform-Binary.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/HostPlatformSelf.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/HostPlatformSelf-Binary.txt
-  cd ${tmp_boot_dir}/data/Fedora/devel/atomic
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/Atomic.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/runtime-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/Atomic-Binary.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-source-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/AtomicSelf.txt
-  cat {aarch64,i686,ppc64le,s390x,x86_64}/selfhosting-binary-packages-short.txt | grep -v -e ^fedora -e ^shim -e ^fedpkg | sort -u -o ${WEB_DIR}/AtomicSelf-Binary.txt
-  # Now create toplevel and dependency lists
-  cat ${WEB_DIR}/modules/modules.package-list.txt | awk '{print $1}' | sort -u -o ${WEB_DIR}/Modules.txt
-  cat ${WEB_DIR}/Modules.txt ${WEB_DIR}/Bootstrap.txt ${WEB_DIR}/HostPlatform.txt ${WEB_DIR}/Atomic.txt | sort -u -o ${WEB_DIR}/Runtime.txt
-  cat ${WEB_DIR}/Modules.txt ${WEB_DIR}/Bootstrap-Binary.txt ${WEB_DIR}/HostPlatform-Binary.txt ${WEB_DIR}/Atomic-Binary.txt | sort -u -o ${WEB_DIR}/Runtime-Binary.txt
-  cat ${WEB_DIR}/Modules.txt ${WEB_DIR}/BootSelf.txt ${WEB_DIR}/HostPlatformSelf.txt ${WEB_DIR}/AtomicSelf.txt | sort -u -o ${WEB_DIR}/SelfHosting.txt
-  cat ${WEB_DIR}/Modules.txt ${WEB_DIR}/BootSelf-Binary.txt ${WEB_DIR}/HostPlatformSelf-Binary.txt ${WEB_DIR}/AtomicSelf-Binary.txt | sort -u -o ${WEB_DIR}/SelfHosting-Binary.txt
-  comm -13 ${WEB_DIR}/Runtime.txt ${WEB_DIR}/SelfHosting.txt | sort -u -o ${WEB_DIR}/Dependencies.txt
-  comm -13 ${WEB_DIR}/Runtime-Binary.txt ${WEB_DIR}/SelfHosting-Binary.txt | sort -u -o ${WEB_DIR}/Dependencies-Binary.txt
-  cat  ${WEB_DIR}/SelfHosting.txt ${WEB_DIR}/BlackList.txt ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/EverythingKnown.txt
-  brew -q list-pkgs --tag=rhel-8.0-candidate | awk '{print $1}' | sort -u -o ${WEB_DIR}/RHEL8PkgList.txt
-  comm -23 ${WEB_DIR}/RHEL8PkgList.txt ${WEB_DIR}/EverythingKnown.txt | sort -u -o ${WEB_DIR}/Unknown.txt
+
+  # Find BaseOS Packages
+  echo "      Finding BaseOS Packages"
+  rm -f ${WORKDIR}/tmp/BaseOS.{html,nvr,txt}
+  wget -q -O ${WORKDIR}/tmp/BaseOS.html http://download-node-02.eng.bos.redhat.com/nightly/latest-RHEL-8/compose/BaseOS/source/tree/Packages/
+  grep 'src.rpm' ${WORKDIR}/tmp/BaseOS.html | cut -d'"' -f6 | sed 's/.src.rpm$/.src/' | sort -u -o ${WORKDIR}/tmp/BaseOS.nvr
+  for check_package in $(cat ${WORKDIR}/tmp/BaseOS.nvr)
+  do
+    grep "^${check_package} " ${DEB_DIR}/conversion-bnvra-bname-sname.txt | awk '{print $3}' >> ${WORKDIR}/tmp/BaseOS.txt
+  done
+  sort -u -o ${WORKDIR}/tmp/BaseOS.txt ${WORKDIR}/tmp/BaseOS.txt
+  if diff -q ${WORKDIR}/tmp/BaseOS.txt ${WEB_DIR}/BaseOS.txt > /dev/null ; then
+    # No change in Leaves, remove the temp file
+    rm -f ${WORKDIR}/tmp/BaseOS.txt
+  else
+    # Leaves changed, move new one in
+    mv -v ${WORKDIR}/tmp/BaseOS.txt ${WEB_DIR}/BaseOS.txt
+  fi
+
+  # Find AppStream Packages
+  echo "      Finding AppStream Packages"
+  rm -f ${WORKDIR}/tmp/AppStream.{html,nvr,txt}
+  wget -q -O ${WORKDIR}/tmp/AppStream.html http://download-node-02.eng.bos.redhat.com/nightly/latest-AppStream-8/compose/AppStream/source/tree/Packages/
+  grep 'src.rpm' ${WORKDIR}/tmp/AppStream.html | cut -d'"' -f6 | sed 's/.src.rpm$/.src/' | sort -u -o ${WORKDIR}/tmp/AppStream.nvr
+  for check_package in $(cat ${WORKDIR}/tmp/AppStream.nvr)
+  do
+    grep "^${check_package} " ${DEB_DIR}/conversion-bnvra-bname-sname.txt | awk '{print $3}' >> ${WORKDIR}/tmp/AppStream.txt
+  done
+  sort -u -o ${WORKDIR}/tmp/AppStream.txt ${WORKDIR}/tmp/AppStream.txt
+  if diff -q ${WORKDIR}/tmp/AppStream.txt ${WEB_DIR}/AppStream.txt > /dev/null ; then
+    # No change in Leaves, remove the temp file
+    rm -f ${WORKDIR}/tmp/AppStream.txt
+  else
+    # Leaves changed, move new one in
+    mv -v ${WORKDIR}/tmp/AppStream.txt ${WEB_DIR}/AppStream.txt
+  fi
+
+  # Get the list of packages in modules
+  echo "      Finding Module Packages"
+  cat ${MODULES_DIR}/modules.package-list.txt | awk '{print $1}' | sort -u -o ${WEB_DIR}/ModulePackagesBinary.txt
+  rm -f ${WEB_DIR}/ModulePackages.txt
+  cat ModulePackagesBinary.txt | while read line
+  do
+    grep " $line " ${WEB_DIR}/dependencies/conversion-bnvra-bname-sname.txt | head -n 1 | awk '{print $3}' >> ${WEB_DIR}/ModulePackages.txt
+  done
+  sort -u -o ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/ModulePackages.txt
+
+  # Determine Unkown Leaves
+  echo "      Finding Unkown Leaves"
+  cat  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/KnownLeaves.txt
+  # cat  ${WEB_DIR}/TopLevel.txt  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/KnownLeaves.txt
+  comm -23 ${WEB_DIR}/TopLevel.txt ${WEB_DIR}/KnownLeaves.txt | sort -u -o ${WEB_DIR}/OrphanedTopLevel.txt
+  comm -23 ${WEB_DIR}/Leaves.txt ${WEB_DIR}/KnownLeaves.txt | sort -u -o ${WEB_DIR}/UnknownLeaves.txt
+
   echo "    Ending Package Lists Updating"
 }
 
@@ -591,7 +630,23 @@ double_check_build_status() {
 
   echo "  [${this_name}] Double Check Start"
   mkdir -p ${WEB_DIR}/${this_name}
+
+  # Check if it's on the Red List
+  wget -q -O /dev/null ${BREW_DISTGIT_URL}/rpms/${this_name}/tree/.do-not-sync-with-fedora?h=${BREW_BRANCH}
+  if [ $? -eq 0 ] ; then
+      echo "${this_name}" >> ${WEB_DIR}/RedList.txt
+  fi
+
   brew list-tagged --latest  --rpms rhel-8.0-candidate ${this_name} | grep -v -e debuginfo -e debugsource  | sort -u -o ${WORKDIR}/tmp/${this_name}-test-nvra.txt
+  if ! [ -s ${WORKDIR}/tmp/${this_name}-test-nvra.txt ] ; then
+    brew list-tagged --latest  --rpms rhel-8.0-llvm-toolset-candidate ${this_name} | grep -v -e debuginfo -e debugsource  | sort -u -o ${WORKDIR}/tmp/${this_name}-test-nvra.txt
+  fi
+  if ! [ -s ${WORKDIR}/tmp/${this_name}-test-nvra.txt ] ; then
+    brew list-tagged --latest  --rpms rhel-8.0-rust-toolset-candidate ${this_name} | grep -v -e debuginfo -e debugsource  | sort -u -o ${WORKDIR}/tmp/${this_name}-test-nvra.txt
+  fi
+  if ! [ -s ${WORKDIR}/tmp/${this_name}-test-nvra.txt ] ; then
+    brew list-tagged --latest  --rpms rhel-8.0-go-toolset-candidate ${this_name} | grep -v -e debuginfo -e debugsource  | sort -u -o ${WORKDIR}/tmp/${this_name}-test-nvra.txt
+  fi
   if [ -s ${WORKDIR}/tmp/${this_name}-test-nvra.txt ] ; then
     if diff -q ${WEB_DIR}/${this_name}/latest-nvra.txt ${WORKDIR}/tmp/${this_name}-test-nvra.txt > /dev/null ; then
       # There was no changes, no need to do anything.
@@ -610,22 +665,6 @@ double_check_build_status() {
       this_vr="$(echo ${this_nvr} | sed "s/^${this_name}-//")"
       grep -v .src$ ${WEB_DIR}/${this_name}/latest-nvra.txt | sed "s/-${this_vr}.*//" | sort -u -o ${WEB_DIR}/${this_name}/binary-packages.txt
     fi
-    # for check_nvra in $(grep .el8 ${WEB_DIR}/${this_name}/binary-packages.txt)
-    # do
-    #   check_nvr="$(echo ${check_nvra} | sed 's/.aarch64$//' | sed 's/.i686$//' | sed 's/.ppc64le$//' | sed 's/.s390x$//' | sed 's/.x86_64$//' | sed 's/.noarch$//')"
-    #   check_name=""
-    #   if [ -s ${WEB_DIR}/${this_name}/nvr.to.name.txt ] ; then
-    #     check_name="$(grep ^${check_nvr} ${WEB_DIR}/${this_name}/nvr.to.name.txt | awk '{print $2}')"
-    #   fi
-    #   if [ "${check_name}" == "" ] ; then
-    #     check_name="$(dnf --disablerepo=* --enablerepo=rhel-8.0-candidate info ${check_nvr} | grep ^Name | head -n1 | awk '{print $3}')"
-    #     if [ "${check_name}" != "" ] ; then
-    #       echo "${check_nvr} ${check_name}" >> ${WEB_DIR}/${this_name}/nvr.to.name.txt
-    #     fi
-    #   fi
-    #   sed "s/^${check_nvra}$/${check_name}/" ${WEB_DIR}/${this_name}/binary-packages.txt
-    # done
-    # sort -u -o ${WEB_DIR}/${this_name}/binary-packages.txt ${WEB_DIR}/${this_name}/binary-packages.txt
   else
     echo "    [${this_name}] No Builds"
     this_nvr="NONE"
@@ -643,9 +682,6 @@ double_check_build_status() {
     cd ${this_name}
     rhpkg switch-branch rhel-8.0 >> ${LOGFILE} 2>&1
     rhpkg pull >> ${LOGFILE} 2>&1
-    if [ -s .rhel8-metadata ] ; then
-      cp .rhel8-metadata ${WEB_DIR}/${this_name}/rhel8-metadata.txt
-    fi
     this_brew_nvr="$(rhpkg verrel 2>/dev/null | sed "s/.el8/${BREW_DIST}/")"
     if [ "${this_brew_nvr}" == "" ] ; then
       this_brew_nvr="NONE"
@@ -665,50 +701,9 @@ double_check_build_status() {
       cd ${this_name}
       rhpkg switch-branch rhel-8.0 >> ${LOGFILE} 2>&1
       rhpkg pull >> ${LOGFILE} 2>&1
-      if [ -s .rhel8-metadata ] ; then
-        cp .rhel8-metadata ${WEB_DIR}/${this_name}/rhel8-metadata.txt
-      fi
       this_brew_nvr="$(rhpkg verrel 2>/dev/null | sed "s/.el8/${BREW_DIST}/")"
     fi
   fi
-  # # Find out and check brew nvr
-  # cd ${WORKDIR}/brew/
-  # if  ! [ -d ${this_name} ] ; then
-  #   rhpkg clone ${this_name} >> ${LOGFILE} 2>&1
-  # fi
-  # cd ${this_name}
-  # rhpkg switch-branch rhel-8.0 >> ${LOGFILE} 2>&1
-  # rhpkg pull >> ${LOGFILE} 2>&1
-  # if [ -s .rhel8-metadata ] ; then
-  #   cp .rhel8-metadata ${WEB_DIR}/${this_name}/rhel8-metadata.txt
-  # fi
-  # this_brew_nvr="$(rhpkg verrel 2>/dev/null)"
-  # if [ "${this_brew_nvr}" == "" ] ; then
-  #   this_brew_nvr="NONE"
-  #   this_brew_status="WARN"
-  #   echo "    [${this_name}] Build Does Not Match Dist-Git: ${this_nvr} != ${this_brew_nvr}"
-  # else
-  #   this_brew_nvr_dist="$(echo ${this_brew_nvr} | sed 's/.el8+[0-9]/.dist/' | sed 's/.el8_[0-9]/.dist/' | sed 's/.el8/.dist/')"
-  #   if [ "${this_nvr_dist}" == "${this_brew_nvr_dist}" ] ; then
-  #     echo "    [${this_name}] Build Matches Dist-Git: ${this_brew_nvr}"
-  #     this_brew_status="SUCCESS"
-  #   else
-  #     echo "    [${this_name}] Build Does Not Match Dist-Git: ${this_nvr} != ${this_brew_nvr}"
-  #     this_brew_status="WARN"
-  #   fi
-  # fi
-    # if [ "${this_fed_nvr}" == "" ] ; then
-    #   this_fed_name="$(grep ^${this_name} ${WEB_DIR}/BootSelf.txt | head -n1)"
-    #   if [ "${this_fed_name}" == "" ] ; then
-    #     this_fed_nvr="NONE"
-    #     this_fed_status="NONE"
-    #   else
-    #     this_fed_nvr="$(grep ^${this_fed_name} ${WEB_DIR}/BootSelf-Full.txt | head -n1)"
-    #     this_fed_status="WARN"
-    #   fi
-    # else
-    #   this_fed_status="SUCCESS"
-    # fi
   cd ${SCRIPT_HOME}
   update_overall_status ${this_name} ${this_nvr} ${this_status} ${task_number} ${this_brew_nvr} ${this_brew_status}
   echo "  [${this_name}] Double Check End"
@@ -874,11 +869,12 @@ create_status_page() {
     echo "<head><title>RHEL Build Progress ${this_type}</title></head>" >> ${this_html}
     echo "<body>" >> ${this_html}
     echo "<h1>RHEL ${this_type} Build Progress: ${BREW_DIST}</h1>" >> ${this_html}
+    cat ${WEB_DIR}/${this_type}.comment.txt >> ${this_html}
     echo "<p>Page updated: " >> ${this_html}
     date --utc >> ${this_html}
     echo "<br><a href=\"overall-status-$(date --date=yesterday +%Y-%m-%d).html\">Yesterdays Overall Status $(date --date=yesterday +%Y-%m-%d)</a>" >> ${this_html}
     echo "</p>" >> ${this_html}
-    echo "<h2>Module Pages</h2>" >> ${this_html}
+    echo "<h2>Other Status Pages</h2>" >> ${this_html}
     echo "<p>" >> ${this_html}
     for this_mod_name in overall-status ${MODULE_LIST}
     do
@@ -945,10 +941,11 @@ create_status_page() {
     echo "<head><title>RHEL Build Progress ${mod_name}</title></head>" >> ${WEB_DIR}/${mod_name}.html
     echo "<body>" >> ${WEB_DIR}/${mod_name}.html
     echo "<h1>RHEL ${mod_name} Build Progress: ${BREW_DIST}</h1>" >> ${WEB_DIR}/${mod_name}.html
+    cat ${WEB_DIR}/${mod_name}.comment.txt >> ${WEB_DIR}/${mod_name}.html
     echo "<p>Page updated: " >> ${WEB_DIR}/${mod_name}.html
     date --utc >> ${WEB_DIR}/${mod_name}.html
     echo "</p>" >> ${WEB_DIR}/${mod_name}.html
-    echo "<h2>Module Pages</h2>" >> ${WEB_DIR}/${mod_name}.html
+    echo "<h2>Other Status Pages</h2>" >> ${WEB_DIR}/${mod_name}.html
     echo "<p>" >> ${WEB_DIR}/${mod_name}.html
     for this_mod_name in overall-status ${MODULE_LIST}
     do
@@ -968,11 +965,13 @@ create_status_page() {
 
     cat  ${WEB_DIR}/${mod_name}.txt | while read line
     do
-      package_line="$(grep ">${line}<" ${OVERALL_HTML})"
-      if [ "${package_line}" == "" ]; then
-        package_line="<tr><td>${line}</td><td>NO INFO</td><td>No Info</td><td>No Info</td></tr>"
+      if [ "${line}" != "" ] ; then
+        package_line="$(grep ">${line}<" ${OVERALL_HTML})"
+        if [ "${package_line}" == "" ]; then
+          package_line="<tr><td>${line}</td><td>NO INFO</td><td>No Info</td><td>No Info</td></tr>"
+        fi
+        echo "${package_line}" >> ${WEB_DIR}/${mod_name}.html
       fi
-      echo "${package_line}" >> ${WEB_DIR}/${mod_name}.html
     done
 
     echo "</table>" >> ${WEB_DIR}/${mod_name}.html
@@ -1221,8 +1220,10 @@ case "${COMMAND}" in
       cp ${OVERALL_HTML} ${OLD_OVERALL_HTML}
     fi
     update_bootstrap_info
-    # A Fresh file each time
+    # A Fresh overall and redlist file each time
     rm -f ${OVERALL_TXT}
+    rm -f ${WEB_DIR}/RedList.txt
+    touch ${WEB_DIR}/RedList.txt
     cd ${SCRIPT_HOME}
     export -f double_check_build_status
     export -f update_overall_status
