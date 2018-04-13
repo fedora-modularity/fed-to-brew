@@ -579,7 +579,16 @@ update_bootstrap_info() {
   grep 'src.rpm' ${WORKDIR}/tmp/AppStream.html | cut -d'"' -f6 | sed 's/.src.rpm$/.src/' | sort -u -o ${WORKDIR}/tmp/AppStream.nvr
   for check_package in $(cat ${WORKDIR}/tmp/AppStream.nvr)
   do
-    grep "^${check_package} " ${DEB_DIR}/conversion-bnvra-bname-sname.txt | awk '{print $3}' >> ${WORKDIR}/tmp/AppStream.txt
+    # grep "^${check_package} " ${DEB_DIR}/conversion-bnvra-bname-sname.txt | awk '{print $3}' >> ${WORKDIR}/tmp/AppStream.txt
+    this_sname_test="$(grep "^${check_package} " ${DEB_DIR}/conversion-bnvra-bname-sname.txt | awk '{print $3}')"
+    if [ "${this_sname_test}" == "" ] ; then
+      this_nvr="$(echo ${check_package} | sed 's|.src$||')"
+      this_sname="$(brew buildinfo ${this_nvr} | grep src.rpm | cut -d'/' -f6)"
+      echo "${check_package} ${this_sname} ${this_sname}" >>${DEB_DIR}/conversion-bnvra-bname-sname.txt
+      echo "${this_sname}" >> ${WORKDIR}/tmp/AppStream.txt
+    else
+      echo "${this_sname_test}" >> ${WORKDIR}/tmp/AppStream.txt
+    fi
   done
   sort -u -o ${WORKDIR}/tmp/AppStream.txt ${WORKDIR}/tmp/AppStream.txt
   if diff -q ${WORKDIR}/tmp/AppStream.txt ${WEB_DIR}/AppStream.txt > /dev/null ; then
@@ -600,9 +609,15 @@ update_bootstrap_info() {
   done
   sort -u -o ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/ModulePackages.txt
 
+  # Get the list of packages in modules
+  echo "      Finding BuildRoot Packages"
+  cat ${WEB_DIR}/overall-status.txt | awk '{print $1}' | sort -u -o ${WEB_DIR}/AllPackages.txt
+  cat  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt | sort -u -o ${WEB_DIR}/AlreadyInRepo.txt
+  comm -23 ${WEB_DIR}/AllPackages.txt ${WEB_DIR}/AlreadyInRepo.txt | sort -u -o ${WEB_DIR}/BuildRoot.txt
+
   # Determine Unkown Leaves
   echo "      Finding Unkown Leaves"
-  cat  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/KnownLeaves.txt
+  cat  ${WEB_DIR}/TopLevel.txt  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/KnownLeaves.txt
   # cat  ${WEB_DIR}/TopLevel.txt  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/KnownLeaves.txt
   comm -23 ${WEB_DIR}/TopLevel.txt ${WEB_DIR}/KnownLeaves.txt | sort -u -o ${WEB_DIR}/OrphanedTopLevel.txt
   comm -23 ${WEB_DIR}/Leaves.txt ${WEB_DIR}/KnownLeaves.txt | sort -u -o ${WEB_DIR}/UnknownLeaves.txt
