@@ -179,6 +179,7 @@ update_overall_status() {
   update_task_number="${4}"
   update_fed_nvr="${5}"
   update_fed_status="${6}"
+  update_repo_list="${7}"
   SCRIPT_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
   if [ -f ${SCRIPT_HOME}/fed-to-brew.conf ] ; then
     source ${SCRIPT_HOME}/fed-to-brew.conf
@@ -198,8 +199,9 @@ update_overall_status() {
     echo "    update_task_number: ${update_task_number}"
     echo "    update_fed_nvr: ${update_fed_nvr}"
     echo "    update_fed_status: ${update_fed_status}"
+    echo "    update_repo_list: ${update_repo_list}"
   fi
-  flock ${LOCK_FILE} echo "${update_name} ${update_nvr} ${update_status} ${update_task_number} ${update_fed_nvr} ${update_fed_status}" >> ${OVERALL_TXT}
+  flock ${LOCK_FILE} echo "${update_name} ${update_nvr} ${update_status} ${update_task_number} ${update_fed_nvr} ${update_fed_status} ${update_repo_list}" >> ${OVERALL_TXT}
 }
 
 ###############
@@ -320,12 +322,12 @@ sync_distgit() {
     echo "    [${this_name}] source_list: ${source_list}"
     echo "    [${this_name}] COMMIT_MESSAGE: ${COMMIT_MESSAGE}"
   fi
-  rhpkg new-sources ${source_list} >> ${LOGFILE} 2>&1
+  rhpkg-sha512 new-sources ${source_list} >> ${LOGFILE} 2>&1
   git add -A >> ${LOGFILE} 2>&1
-  rhpkg commit -m "Uploaded sources to go with sync from Fedora - fed_hash: ${fed_hash}" >> ${LOGFILE} 2>&1
+  rhpkg-sha512 commit -m "Uploaded sources to go with sync from Fedora - fed_hash: ${fed_hash}" >> ${LOGFILE} 2>&1
 
   echo "      [${this_name}] Pushing everything to Brew dist-git"
-  rhpkg push >> ${LOGFILE} 2>&1
+  rhpkg-sha512 push >> ${LOGFILE} 2>&1
   BREW_COMMIT_HASH="$(git log -n1 --format=%H)"
   THIS_NVR="$(fedpkg --release master verrel 2>/dev/null | sed 's|.fc2[0-9]|.dist|')"
   if [ "${THIS_NVR}" == "" ] ; then
@@ -617,10 +619,11 @@ update_bootstrap_info() {
 
   # Determine Unkown Leaves
   echo "      Finding Unkown Leaves"
-  cat  ${WEB_DIR}/TopLevel.txt  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/KnownLeaves.txt
+  cat  ${WEB_DIR}/TopLevel.txt  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/AllKnownPackages.txt
+  cat  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/KnownPackages.txt
   # cat  ${WEB_DIR}/TopLevel.txt  ${WEB_DIR}/ModulePackages.txt ${WEB_DIR}/BaseOS.txt ${WEB_DIR}/AppStream.txt ${WEB_DIR}/KnownExtraLeaves.txt  ${WEB_DIR}/RedList.txt | sort -u -o ${WEB_DIR}/KnownLeaves.txt
-  comm -23 ${WEB_DIR}/TopLevel.txt ${WEB_DIR}/KnownLeaves.txt | sort -u -o ${WEB_DIR}/OrphanedTopLevel.txt
-  comm -23 ${WEB_DIR}/Leaves.txt ${WEB_DIR}/KnownLeaves.txt | sort -u -o ${WEB_DIR}/UnknownLeaves.txt
+  comm -23 ${WEB_DIR}/TopLevel.txt ${WEB_DIR}/KnownPackages.txt | sort -u -o ${WEB_DIR}/OrphanedTopLevel.txt
+  comm -23 ${WEB_DIR}/Leaves.txt ${WEB_DIR}/AllKnownPackages.txt | sort -u -o ${WEB_DIR}/UnknownLeaves.txt
 
   echo "    Ending Package Lists Updating"
 }
@@ -719,8 +722,23 @@ double_check_build_status() {
       this_brew_nvr="$(rhpkg verrel 2>/dev/null | sed "s/.el8/${BREW_DIST}/")"
     fi
   fi
+  # Find what repo(s) this package is in
+  export this_repo_list="-"
+  if grep -q ^${this_name}$ ${WEB_DIR}/BaseOS.txt ; then
+    export this_repo_list="${this_repo_list}Base-"
+  fi
+  if grep -q ^${this_name}$ ${WEB_DIR}/AppStream.txt ; then
+    export this_repo_list="${this_repo_list}App-"
+  fi
+  if grep -q ^${this_name}$ ${WEB_DIR}/ModulePackages.txt ; then
+    export this_repo_list="${this_repo_list}Mod-"
+  fi
+  if [ "${this_repo_list}" == "-" ] ; then
+    export this_repo_list="-Build-"
+  fi
+  echo "    [${this_name}] Updating Overall Status:  ${this_repo_list}"
+  update_overall_status ${this_name} ${this_nvr} ${this_status} ${task_number} ${this_brew_nvr} ${this_brew_status} ${this_repo_list}
   cd ${SCRIPT_HOME}
-  update_overall_status ${this_name} ${this_nvr} ${this_status} ${task_number} ${this_brew_nvr} ${this_brew_status}
   echo "  [${this_name}] Double Check End"
   #end_job ${job_number}
 }
@@ -917,6 +935,7 @@ create_status_page() {
     this_task="$(echo ${line} | awk '{print $4}')"
     this_fed_nvr="$(echo ${line} | awk '{print $5}')"
     this_fed_status="$(echo ${line} | awk '{print $6}')"
+    this_repo_list="$(echo ${line} | awk '{print $7}')"
     if [ "${this_task}" == "NONE" ] ; then
       task_url=" "
     else
@@ -929,6 +948,7 @@ create_status_page() {
       echo "    this_status: ${this_status}"
       echo "    task_number: ${task_number}"
       echo "    task_url: ${task_url}"
+      echo "    this_repo_list: ${this_repo_list}"
     fi
     this_color="#CCCCFF"
     if [ "${this_status}" == "SUCCESS" ] ; then
@@ -940,11 +960,11 @@ create_status_page() {
     elif [ "${this_fed_status}" == "WARN" ] ; then
       this_fed_color="#FFFFCC"
     fi
-    echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${OVERALL_HTML}
+    echo "<tr><td><a href=\"${this_name}/\">${this_name}</a> ${this_repo_list}</td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${OVERALL_HTML}
     if [ "${this_status}" == "SUCCESS" ] && [ "${this_fed_status}" == "WARN" ] ; then
-      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${BUILDING_HTML}
+      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a> ${this_repo_list}</td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${BUILDING_HTML}
     elif [ "${this_status}" == "NONE" ] ; then
-      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a></td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${FAILURE_HTML}
+      echo "<tr><td><a href=\"${this_name}/\">${this_name}</a> ${this_repo_list}</td><td bgcolor=\"${this_color}\">${this_nvr}</td><td bgcolor=\"${this_fed_color}\">${this_fed_nvr}</td><td>${task_url}</td></tr>" >> ${FAILURE_HTML}
     fi
   done
 
