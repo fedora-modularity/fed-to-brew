@@ -44,13 +44,13 @@ usage() {
   echo "    Check the status of builds" >&2
   echo "  --build --rebuild" >&2
   echo "    (re)Build package(s) in ${KOJI_BINARY}, if they have not already been built." >&2
-  echo "    Mandatory: --yaml OR --text OR [package]" >&2
+  echo "    Mandatory: --text OR [package]" >&2
   echo >&2
   echo "Options:" >&2
   echo "  --text [file]" >&2
   echo "    Text file to use for list of packages" >&2
-  echo "      Each package is on its own line in format <n-v-r>.src" >&2
-  echo "      Example:acl-2.2.52-15.fc27.src" >&2
+  echo "      Each source package name is on its own line." >&2
+  echo "      Example:acl" >&2
   echo "  --jobs [Integer]" >&2
   echo "    Number of jobs to do in parallel" >&2
   echo "  --no-remote --noremote" >&2
@@ -63,7 +63,7 @@ usage() {
   echo "Other:" >&2
   echo "  [package]" >&2
   echo "    If you want to do just a single file, list just the name" >&2
-  echo "    Not applied if either --yaml or --text are used." >&2
+  echo "    Not applied if --text is used." >&2
   echo >&2
   popd &>/dev/null
   exit 1
