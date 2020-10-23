@@ -502,7 +502,6 @@ case "${COMMAND}" in
     cd ${SCRIPT_HOME}
     export -f check_build_status
     export -f build_package
-    export -f contains
     cd ${SCRIPT_HOME}
     echo "Gathering package information"
     echo "${package_list}"  | xargs --max-procs=${PARALLEL_JOBS} -I THIS_PACKAGE \
