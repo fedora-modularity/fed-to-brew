@@ -238,7 +238,7 @@ build_package() {
       if [ "${SCRATCH_BUILD}" == "true" ] || [ "${SCRATCH_BUILD}" == "TRUE" ] ; then
         ${KOJI_PKG_BINARY} build --skip-nvr-check --nowait --scratch --target ${KOJI_TARGET} ${SCRATCH_ARCH} >> ${WORKDIR}/logs/${this_name}.build 2>&1
       else
-        ${KOJI_PKG_BINARY} build --skip-nvr-check --nowait --target ${KOJI_TARGET} >> ${WORKDIR}/logs/${this_name}.build 2>&1
+        ${KOJI_PKG_BINARY} build --skip-nvr-check --background --nowait --target ${KOJI_TARGET} >> ${WORKDIR}/logs/${this_name}.build 2>&1
       fi
   fi
   echo "  [${this_name}] Build Setup End"
